@@ -102,19 +102,29 @@ Return ONLY JSON with this schema:
 def llm_json(istem):
     hatalar = []
     if GEMINI_KEY:
-        for deneme in range(3):
-            try:
-                url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-                       f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}")
-                r = requests.post(url, timeout=120, json={
-                    "contents": [{"parts": [{"text": istem}]}],
-                    "generationConfig": {"temperature": 1.0, "responseMimeType": "application/json"}})
-                r.raise_for_status()
-                metin = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(metin)
-            except Exception as e:
-                hatalar.append(f"Gemini: {e}")
-                time.sleep(10 * (deneme + 1))
+        # Yoğunluk (503/429) olursa sırayla diğer ücretsiz modelleri dener
+        modeller = list(dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest", "gemini-flash-lite-latest",
+                                       "gemini-2.5-flash", "gemini-2.5-flash-lite"]))
+        for tur in range(3):
+            for model in modeller:
+                try:
+                    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                           f"{model}:generateContent?key={GEMINI_KEY}")
+                    r = requests.post(url, timeout=120, json={
+                        "contents": [{"parts": [{"text": istem}]}],
+                        "generationConfig": {"temperature": 1.0, "responseMimeType": "application/json"}})
+                    if r.status_code in (400, 401, 403):
+                        raise RuntimeError(f"Gemini anahtarı reddedildi ({r.status_code}): {r.text[:300]}")
+                    r.raise_for_status()
+                    metin = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    log(f"Senaryo modeli: {model}")
+                    return json.loads(metin)
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    hatalar.append(f"Gemini {model}: {str(e)[:120]}")
+                    time.sleep(3)
+            time.sleep(20 * (tur + 1))
     if GROQ_KEY:
         try:
             r = requests.post("https://api.groq.com/openai/v1/chat/completions", timeout=120,
@@ -126,7 +136,7 @@ def llm_json(istem):
             return json.loads(r.json()["choices"][0]["message"]["content"])
         except Exception as e:
             hatalar.append(f"Groq: {e}")
-    raise RuntimeError("Senaryo üretilemedi. GEMINI_API_KEY veya GROQ_API_KEY gerekli.\n" + "\n".join(hatalar))
+    raise RuntimeError("Senaryo üretilemedi (anahtar yok veya servisler yoğun).\n" + "\n".join(hatalar[-6:]))
 
 
 def senaryo_yaz(konu):
