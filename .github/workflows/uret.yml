@@ -1,0 +1,75 @@
+name: Merak Makinesi - Short uret
+
+on:
+  schedule:
+    # Her gün 13:30 ve 16:30 Türkiye saati (UTC+3). İstersen bir satırı sil = günde 1 video.
+    - cron: "30 10 * * *"
+    - cron: "30 13 * * *"
+  workflow_dispatch:          # Telefondan "Run workflow" ile elle çalıştırma
+    inputs:
+      konu:
+        description: "İstersen kendi konunu yaz (boş = listeden sıradaki)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: merak-makinesi
+  cancel-in-progress: false
+
+jobs:
+  uret:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: ffmpeg ve yazı tipi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+
+      - name: Paketler
+        run: pip install -r requirements.txt
+
+      - name: Short uret
+        env:
+          KONU: ${{ github.event.inputs.konu }}
+          DIL: ${{ vars.DIL }}
+          SES: ${{ vars.SES }}
+          GORSEL_STILI: ${{ vars.GORSEL_STILI }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: python uret.py
+
+      - name: Videoyu indirilebilir yap
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-${{ github.run_number }}
+          path: |
+            cikti/*.mp4
+            cikti/*.json
+          retention-days: 14
+
+      - name: Kullanilan konulari kaydet
+        if: success()
+        run: |
+          git config user.name "merak-makinesi"
+          git config user.email "bot@users.noreply.github.com"
+          git add kullanilan.json
+          git commit -m "Konu kullanildi [skip ci]" || echo "degisiklik yok"
+          git push
