@@ -150,20 +150,26 @@ def senaryo_yaz(konu):
 # ---------------------------------------------------------------- 3) görseller
 def gorsel_uret(istem, hedef, tohum):
     tam = f"{istem}. {GORSEL_STILI}"
-    # a) Pollinations (anahtarsız çalışır; token varsa limit yükselir)
-    for deneme in range(4):
+    # a) Pollinations: anahtarsız eski uç (15 sn'de 1 istek) veya token ile yeni uç
+    for deneme in range(6):
         try:
-            url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(tam) +
-                   f"?width={W}&height={H}&seed={tohum}&model=flux&nologo=true&enhance=false")
-            bas = {"Authorization": f"Bearer {POLL_TOKEN}"} if POLL_TOKEN else {}
-            r = requests.get(url, headers=bas, timeout=180)
+            q = urllib.parse.quote(tam)
+            if POLL_TOKEN:
+                url = (f"https://gen.pollinations.ai/image/{q}"
+                       f"?width={W}&height={H}&seed={tohum}&model=flux&nologo=true")
+                bas = {"Authorization": f"Bearer {POLL_TOKEN}"}
+            else:
+                url = (f"https://image.pollinations.ai/prompt/{q}"
+                       f"?width={W}&height={H}&seed={tohum}&model=flux&nologo=true")
+                bas = {}
+            r = requests.get(url, headers=bas, timeout=120)
             if r.ok and r.headers.get("content-type", "").startswith("image") and len(r.content) > 20000:
                 hedef.write_bytes(r.content)
                 return
             log(f"  Pollinations {r.status_code}, tekrar deneniyor…")
         except Exception as e:
-            log("  Pollinations hata:", e)
-        time.sleep(15 * (deneme + 1))
+            log("  Pollinations hata:", str(e)[:120])
+        time.sleep(20 + 10 * deneme)
     # b) Cloudflare Workers AI (günlük ücretsiz kota)
     if CF_ID and CF_TOKEN:
         import base64
@@ -187,7 +193,7 @@ def gorselleri_uret(s):
         log(f"Görsel {i + 1}/{len(s['sahneler'])}")
         gorsel_uret(istem, hedef, tohum + i)
         sahne["gorsel_dosya"] = str(hedef)
-        time.sleep(3)
+        time.sleep(16)                         # anahtarsız sınır: 15 sn'de 1
 
 
 # ---------------------------------------------------------------- 4) ses
@@ -207,23 +213,79 @@ async def _tts(metin, mp3):
     return kelimeler
 
 
+PIPER_SES = {"en": "en_US-ryan-high", "tr": "tr_TR-dfki-medium"}
+
+
+def _piper_yukle():
+    """Yedek ses: Piper (açık kaynak, sunucuda yerel çalışır, internet servisi gerekmez)."""
+    from piper import PiperVoice
+    ad = ENV("PIPER_SES") or PIPER_SES[DIL]
+    dil_kod, bolge_ad, kalite = ad.split("-")[0], ad.split("-")[1], ad.split("-")[2]
+    klasor = KOK / "sesler"
+    klasor.mkdir(exist_ok=True)
+    taban = (f"https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+             f"{dil_kod.split('_')[0]}/{dil_kod}/{bolge_ad}/{kalite}/{ad}")
+    for uzanti in (".onnx", ".onnx.json"):
+        hedef = klasor / (ad + uzanti)
+        if not hedef.exists() or hedef.stat().st_size < 1000:
+            log(f"  Piper sesi indiriliyor: {ad}{uzanti}")
+            r = requests.get(taban + uzanti, timeout=300)
+            r.raise_for_status()
+            hedef.write_bytes(r.content)
+    return PiperVoice.load(str(klasor / (ad + ".onnx")))
+
+
+def _piper_konus(ses, metin, wav):
+    import wave
+    from piper import SynthesisConfig
+    with wave.open(str(wav), "wb") as wf:
+        ses.synthesize_wav(metin, wf, syn_config=SynthesisConfig(length_scale=0.88))
+
+
+def _kelime_zamanla(metin, d):
+    """Zaman bilgisi yoksa kelimeleri uzunluklarına göre dağıt."""
+    ks = metin.split()
+    agirlik = [len(k) + 2 for k in ks]
+    toplam, t, sonuc = sum(agirlik), 0.0, []
+    for k, a in zip(ks, agirlik):
+        dt = d * a / toplam
+        sonuc.append((t, t + dt, k))
+        t += dt
+    return sonuc
+
+
 def seslendir(s):
-    for i, sahne in enumerate(s["sahneler"]):
-        mp3 = GECICI / f"ses_{i:02d}.mp3"
-        for deneme in range(3):
-            try:
-                kel = asyncio.run(_tts(sahne["metin"], mp3))
+    sahneler = s["sahneler"]
+    # 1) Önce Edge TTS (daha doğal ses). Tek sahne bile başarısız olursa tüm video Piper'a geçer
+    #    ki videoda iki farklı ses olmasın.
+    edge_ok = ENV("TTS", "").lower() != "piper"
+    if edge_ok:
+        for i, sahne in enumerate(sahneler):
+            mp3 = GECICI / f"ses_{i:02d}.mp3"
+            for deneme in range(2):
+                try:
+                    kel = asyncio.run(_tts(sahne["metin"], mp3))
+                    break
+                except Exception as e:
+                    log("  Edge TTS hata:", str(e)[:100])
+                    time.sleep(4)
+            else:
+                edge_ok = False
                 break
-            except Exception as e:
-                log("  TTS hata, tekrar:", e)
-                time.sleep(5)
-        else:
-            raise RuntimeError("Seslendirme başarısız")
-        d = sure(mp3)
-        if not kel:                                  # zaman bilgisi gelmezse eşit dağıt
-            ks = sahne["metin"].split()
-            kel = [(d * j / len(ks), d * (j + 1) / len(ks), k) for j, k in enumerate(ks)]
-        sahne.update(ses_dosya=str(mp3), sure=d + 0.25, kelimeler=kel)
+            d = sure(mp3)
+            sahne.update(ses_dosya=str(mp3), sure=d + 0.25,
+                         kelimeler=kel or _kelime_zamanla(sahne["metin"], d))
+    if edge_ok:
+        log("Ses: Edge TTS")
+        return
+    # 2) Yedek: Piper
+    log("Ses: Piper (yedek)")
+    ses = _piper_yukle()
+    for i, sahne in enumerate(sahneler):
+        wav = GECICI / f"ses_{i:02d}.wav"
+        _piper_konus(ses, sahne["metin"], wav)
+        d = sure(wav)
+        sahne.update(ses_dosya=str(wav), sure=d + 0.25, kelimeler=_kelime_zamanla(sahne["metin"], d))
 
 
 # ---------------------------------------------------------------- 5) altyazı
