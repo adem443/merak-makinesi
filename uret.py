@@ -238,13 +238,13 @@ def seslendir(s):
     if edge_ok:
         for i, sahne in enumerate(sahneler):
             mp3 = GECICI / f"ses_{i:02d}.mp3"
-            for deneme in range(2):
+            for deneme in range(4):
                 try:
                     kel = asyncio.run(_tts(sahne["metin"], mp3))
                     break
                 except Exception as e:
                     log("  Edge TTS hata:", str(e)[:100])
-                    time.sleep(4)
+                    time.sleep(5 * (deneme + 1))
             else:
                 edge_ok = False
                 break
