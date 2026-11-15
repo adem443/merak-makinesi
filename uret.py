@@ -76,27 +76,39 @@ def konu_sec():
 
 
 # ---------------------------------------------------------------- 2) senaryo
-SENARYO_ISTEMI = """You are the head writer of a viral animated YouTube Shorts channel in the style of
-Zack D. Films: short, punchy, 3D-animated curiosity stories (what-if scenarios, how things work,
-bizarre-but-true history, the human body). Write ONE Short about this topic: "{konu}".
+SENARYO_ISTEMI = """You are the head writer of a viral 2D-animated YouTube channel in the style of "The If Lab"
+and Zack D. Films: punchy curiosity stories (what-if scenarios, how things work, bizarre-but-true history,
+the human body). Write ONE vertical Short about this topic: "{konu}".
+
+The video is a 2D cartoon. The star is CURIO, our mascot: a cheerful character with a round yellow
+light-bulb head and a blue hoodie. Curio is the narrator AND the actor: he talks to the viewer
+("you", "I") and acts out the story. Optional side characters: "friend" (pink-headed buddy),
+"scientist" (glasses, lab coat), "kid" (red cap).
 
 Rules:
-- Narration language: {dil}. Natural, spoken, energetic. Total 95-130 words (~40-50 seconds).
+- Narration language: {dil}. Natural, spoken, energetic, funny. Total 100-140 words (~45-55 seconds).
 - Scene 1 is the HOOK: a shocking question or statement the viewer cannot scroll past (max 12 words).
-- Use a concrete protagonist ("you" or a named character) and a mini story with tension and a twist.
-- Every claim must be factually accurate. No gore, no graphic injury, nothing distressing; keep it family-safe.
+- A mini story with tension, a surprising fact and a twist. Every claim must be factually accurate.
+- No gore, no graphic injury, nothing distressing; family-safe.
 - The last scene's narration must flow seamlessly back into the first sentence so the Short loops.
-- {sahne_sayisi} scenes. Each scene: 1-2 short sentences of narration + an English image prompt.
-- Image prompts: describe ONE clear, dramatic, cinematic moment; the main character must be described
-  exactly as in "karakter" every time it appears. No text in images.
-- Vary the structure: do not always start with "What if". Surprise the viewer.
+- {sahne_sayisi} scenes, 1-2 short sentences each. Change background, expression or action every scene.
+
+For every scene choose ONLY from these values:
+- "arka_plan": room | park | city | space | ocean | lab | night | volcano | desert
+- "ifade" (Curio's face): neutral | happy | excited | shocked | worried | thinking | sad | angry | smug
+- "hareket" (Curio's action): explain | wave | point | shrug | hands_up | think | hips | cheer |
+  facepalm | walk_in | walk | jump | float | shake
+- "nesne" (big animated object above Curio, or null): earth | moon | rocket | plane | clock |
+  lightning | phone | car | atom | null
+- "kamera": push_in | punch | static   (use "punch" for surprising moments)
+- "ikinci": null, or {{"tip": "friend|scientist|kid", "ifade": "<one ifade value>"}} (max 2 scenes)
 
 Return ONLY JSON with this schema:
 {{"baslik": "catchy title in {dil}, max 70 chars, 1 emoji",
   "aciklama": "2-3 sentence description in {dil} + 3 hashtags",
   "etiketler": ["8-12 tags in {dil}"],
-  "karakter": "English visual description of the main recurring character (age, hair, clothes, colors)",
-  "sahneler": [{{"metin": "narration", "gorsel": "English image prompt"}}]}}"""
+  "sahneler": [{{"metin": "narration", "arka_plan": "...", "ifade": "...", "hareket": "...",
+                 "nesne": null, "kamera": "...", "ikinci": null}}]}}"""
 
 
 def llm_json(istem):
@@ -143,57 +155,21 @@ def senaryo_yaz(konu):
     s = llm_json(SENARYO_ISTEMI.format(konu=konu, dil="Turkish" if DIL == "tr" else "English",
                                        sahne_sayisi=random.choice([6, 7, 8])))
     assert s.get("sahneler"), "Senaryo boş geldi"
+    import animasyon as A
+    for i, sh in enumerate(s["sahneler"]):
+        if sh.get("arka_plan") not in A.ARKA_PLANLAR:
+            sh["arka_plan"] = random.choice(list(A.ARKA_PLANLAR))
+        if sh.get("ifade") not in A.IFADELER:
+            sh["ifade"] = "neutral"
+        if sh.get("nesne") not in A.NESNELER:
+            sh["nesne"] = None
+        if sh.get("kamera") not in ("push_in", "punch", "static"):
+            sh["kamera"] = "punch" if i == 0 else "push_in"
+        ik = sh.get("ikinci")
+        if not (isinstance(ik, dict) and ik.get("tip") in A.KARAKTERLER and ik.get("tip") != "hero"):
+            sh["ikinci"] = None
     s["konu"] = konu
     return s
-
-
-# ---------------------------------------------------------------- 3) görseller
-def gorsel_uret(istem, hedef, tohum):
-    tam = f"{istem}. {GORSEL_STILI}"
-    # a) Pollinations: anahtarsız eski uç (15 sn'de 1 istek) veya token ile yeni uç
-    for deneme in range(6):
-        try:
-            q = urllib.parse.quote(tam)
-            if POLL_TOKEN:
-                url = (f"https://gen.pollinations.ai/image/{q}"
-                       f"?width={W}&height={H}&seed={tohum}&model=flux&nologo=true")
-                bas = {"Authorization": f"Bearer {POLL_TOKEN}"}
-            else:
-                url = (f"https://image.pollinations.ai/prompt/{q}"
-                       f"?width={W}&height={H}&seed={tohum}&model=flux&nologo=true")
-                bas = {}
-            r = requests.get(url, headers=bas, timeout=120)
-            if r.ok and r.headers.get("content-type", "").startswith("image") and len(r.content) > 20000:
-                hedef.write_bytes(r.content)
-                return
-            log(f"  Pollinations {r.status_code}, tekrar deneniyor…")
-        except Exception as e:
-            log("  Pollinations hata:", str(e)[:120])
-        time.sleep(20 + 10 * deneme)
-    # b) Cloudflare Workers AI (günlük ücretsiz kota)
-    if CF_ID and CF_TOKEN:
-        import base64
-        r = requests.post(
-            f"https://api.cloudflare.com/client/v4/accounts/{CF_ID}/ai/run/@cf/black-forest-labs/flux-1-schnell",
-            headers={"Authorization": f"Bearer {CF_TOKEN}"}, json={"prompt": tam, "steps": 8}, timeout=180)
-        r.raise_for_status()
-        hedef.write_bytes(base64.b64decode(r.json()["result"]["image"]))
-        return
-    raise RuntimeError("Görsel üretilemedi (Pollinations yanıt vermedi, Cloudflare ayarlı değil).")
-
-
-def gorselleri_uret(s):
-    tohum = random.randint(1, 10**6)          # aynı videoda tutarlı stil için ortak tohum
-    karakter = s.get("karakter", "")
-    for i, sahne in enumerate(s["sahneler"]):
-        hedef = GECICI / f"sahne_{i:02d}.jpg"
-        istem = sahne["gorsel"]
-        if karakter and "character" not in istem.lower():
-            istem += f". Main character: {karakter}"
-        log(f"Görsel {i + 1}/{len(s['sahneler'])}")
-        gorsel_uret(istem, hedef, tohum + i)
-        sahne["gorsel_dosya"] = str(hedef)
-        time.sleep(16)                         # anahtarsız sınır: 15 sn'de 1
 
 
 # ---------------------------------------------------------------- 4) ses
@@ -322,66 +298,21 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Ana,DejaVu Sans,86,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,80,80,620,1
+Style: Ana,DejaVu Sans,78,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,70,70,370,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """ + "\n".join(satirlar) + "\n", "utf-8")
 
 
-# ---------------------------------------------------------------- 6) montaj
-def hareket(i, kare):
-    """Her sahneye farklı kamera hareketi → şablon hissini kırar."""
-    secenekler = [
-        f"z='min(1+0.0012*on,1.18)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",            # yakınlaş
-        f"z='max(1.18-0.0012*on,1)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",            # uzaklaş
-        f"z='1.15':x='(iw-iw/zoom)*on/{kare}':y='ih/2-(ih/zoom/2)'",                         # sağa kay
-        f"z='1.15':x='(iw-iw/zoom)*(1-on/{kare})':y='ih/2-(ih/zoom/2)'",                     # sola kay
-        f"z='1.15':x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*(1-on/{kare})'",                     # yukarı kay
-    ]
-    return secenekler[0] if i == 0 else random.choice(secenekler)
-
-
-def sahne_klibi(i, sahne):
-    kare = math.ceil(sahne["sure"] * FPS)
-    klip = GECICI / f"klip_{i:02d}.mp4"
-    vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-          f"scale={W * 2}:{H * 2},zoompan={hareket(i, kare)}:d={kare}:s={W}x{H}:fps={FPS},"
-          f"eq=saturation=1.12:contrast=1.04,format=yuv420p")
-    calistir(["ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-i", sahne["gorsel_dosya"],
-              "-i", sahne["ses_dosya"], "-filter_complex", f"[0:v]{vf}[v];[1:a]apad,aresample=44100[a]",
-              "-map", "[v]", "-map", "[a]", "-t", f"{sahne['sure']:.3f}", "-r", str(FPS),
-              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k",
-              "-ar", "44100", "-ac", "2", str(klip)])
-    return klip
-
-
+# ---------------------------------------------------------------- 6) animasyon
 def montaj(s, cikti_mp4):
-    klipler = [sahne_klibi(i, sh) for i, sh in enumerate(s["sahneler"])]
-    liste = GECICI / "liste.txt"
-    liste.write_text("".join(f"file '{k}'\n" for k in klipler))
-    ham = GECICI / "ham.mp4"
-    calistir(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(liste),
-              "-c", "copy", str(ham)])
+    import animasyon as A
     ass = GECICI / "altyazi.ass"
     altyazi_yaz(s, ass)
-    toplam = sure(ham)
     muzikler = sorted((KOK / "muzik").glob("*.mp3")) if (KOK / "muzik").exists() else []
-    vf = f"subtitles={ass}"
-    if muzikler:
-        muzik = random.choice(muzikler)
-        calistir(["ffmpeg", "-y", "-loglevel", "error", "-i", str(ham), "-stream_loop", "-1",
-                  "-i", str(muzik), "-filter_complex",
-                  f"[0:v]{vf}[v];[1:a]volume=0.12,afade=t=out:st={max(toplam - 1.5, 0):.2f}:d=1.5[m];"
-                  f"[0:a][m]amix=inputs=2:duration=first:dropout_transition=0,loudnorm=I=-14:TP=-1.5[a]",
-                  "-map", "[v]", "-map", "[a]", "-t", f"{toplam:.3f}", "-c:v", "libx264",
-                  "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k",
-                  "-movflags", "+faststart", str(cikti_mp4)])
-    else:
-        calistir(["ffmpeg", "-y", "-loglevel", "error", "-i", str(ham), "-vf", vf,
-                  "-af", "loudnorm=I=-14:TP=-1.5", "-c:v", "libx264", "-preset", "veryfast",
-                  "-crf", "20", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(cikti_mp4)])
-    return toplam
+    return A.render(s["sahneler"], cikti_mp4, ass=ass, W=W, H=H,
+                    muzik=random.choice(muzikler) if muzikler else None)
 
 
 # ---------------------------------------------------------------- 7) yayın
@@ -436,7 +367,6 @@ def main():
     log("Konu:", konu)
     s = senaryo_yaz(konu)
     log("Başlık:", s["baslik"])
-    gorselleri_uret(s)
     seslendir(s)
     damga = datetime.now().strftime("%Y%m%d_%H%M")
     mp4 = CIKTI / f"short_{damga}.mp4"
