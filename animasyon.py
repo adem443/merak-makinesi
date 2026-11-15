@@ -1,31 +1,38 @@
 """
-Merak Makinesi — 2D karakter animasyon motoru (tamamen kodla çizilir, ücretsiz, yerel).
+Merak Makinesi — 2D çizgi film animasyon motoru v2 (tamamen kodla çizilir, ücretsiz, yerel).
 
-Her şey vektörel olarak Cairo ile her karede yeniden çizilir:
-- Karakter iskeleti: göz kırpma, sese göre konuşan ağız, ifadeler, kol pozları,
-  yürüme, zıplama, titreme, nefes alma.
-- Arka planlar: oda, şehir, uzay, okyanus, laboratuvar, park, gece, volkan, çöl
-  (bulut, yıldız, kabarcık, duman gibi hareketli öğelerle).
-- Nesneler: dünya, ay, roket, uçak, saat, şimşek, telefon, araba, atom.
-- Kamera: sabit, yavaş yakınlaşma, ani yakınlaşma.
+- Karakter kadrosu (siyah kafa, iri beyaz gözler, renkli kıyafet tarzı): hero, mom, dad, friend,
+  scientist, kid, grandpa, girl, astronaut. Göz kırpma, göz kapağıyla ifade, el-kol pozları,
+  yürüme, koşma, zıplama, uyuma, savrulma, dönme, titreme...
+- 12 derinlikli mekân: perspektifli odalar, katmanlı manzaralar, paralaks kamera, ön plan nesneleri,
+  gölgeler ve vinyet.
+- Sahne başına 1-3 karakter, uzaktaki karakter küçük ve geride.
 
-Kullanım:  render(sahneler, cikti_mp4, ass_dosyasi)
-sahne = {"ses_dosya", "sure", "arka_plan", "ifade", "hareket", "nesne", "kamera", "ikinci"}
+render(sahneler, cikti_mp4, ass, W, H, muzik)
+sahne = {"ses_dosya", "sure", "arka_plan", "kamera", "nesne",
+         "karakterler": [{"tip", "ifade", "hareket"}, ...]}
 """
 import math
+import os
 import random
 import subprocess
+import tempfile
 
 import cairo
-import numpy as np
 
 FPS = 30
-INK = (0.11, 0.11, 0.16)
+INK = (0.08, 0.08, 0.10)
+SKIN = "#141414"
 
 
 def hx(h, a=1.0):
     h = h.lstrip("#")
     return (int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255, a)
+
+
+def mix(h1, h2, k):
+    a, b = hx(h1), hx(h2)
+    return tuple(a[i] + (b[i] - a[i]) * k for i in range(3)) + (1.0,)
 
 
 def ease(x):
@@ -37,19 +44,35 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
-# ============================================================ yardımcı çizim
-def fill_stroke(c, fill, lw=None, stroke=INK):
-    c.set_source_rgba(*fill)
+# ============================================================ çizim yardımcıları
+def setc(c, col):
+    if isinstance(col, str):
+        col = hx(col)
+    c.set_source_rgba(*(col if len(col) == 4 else (*col, 1)))
+
+
+def fs(c, fill, lw=0, stroke=INK):
+    setc(c, fill)
     if lw:
         c.fill_preserve()
-        c.set_source_rgba(*stroke) if len(stroke) == 4 else c.set_source_rgb(*stroke)
+        setc(c, stroke)
         c.set_line_width(lw)
+        c.set_line_join(cairo.LINE_JOIN_ROUND)
         c.stroke()
     else:
         c.fill()
 
 
+def poly(c, pts, fill, lw=0, stroke=INK):
+    c.move_to(*pts[0])
+    for p in pts[1:]:
+        c.line_to(*p)
+    c.close_path()
+    fs(c, fill, lw, stroke)
+
+
 def rrect(c, x, y, w, h, r):
+    r = max(0.01, min(r, abs(w) / 2, abs(h) / 2))
     c.new_sub_path()
     c.arc(x + w - r, y + r, r, -math.pi / 2, 0)
     c.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
@@ -58,7 +81,7 @@ def rrect(c, x, y, w, h, r):
     c.close_path()
 
 
-def ellipse(c, x, y, rx, ry):
+def ell(c, x, y, rx, ry):
     c.save()
     c.translate(x, y)
     c.scale(max(rx, 0.01), max(ry, 0.01))
@@ -66,13 +89,13 @@ def ellipse(c, x, y, rx, ry):
     c.restore()
 
 
-def line(c, pts, lw, col=INK, cap=cairo.LINE_CAP_ROUND):
-    c.set_line_cap(cap)
+def ln(c, pts, lw, col=INK):
+    c.set_line_cap(cairo.LINE_CAP_ROUND)
     c.set_line_join(cairo.LINE_JOIN_ROUND)
     c.move_to(*pts[0])
     for p in pts[1:]:
         c.line_to(*p)
-    c.set_source_rgba(*(col if len(col) == 4 else (*col, 1)))
+    setc(c, col)
     c.set_line_width(lw)
     c.stroke()
 
@@ -86,242 +109,329 @@ def vgrad(c, x, y, w, h, top, bottom):
     c.fill()
 
 
-# ============================================================ karakterler
+def glow(c, x, y, r, col, a=0.5):
+    g = cairo.RadialGradient(x, y, 0, x, y, r)
+    g.add_color_stop_rgba(0, *hx(col, a))
+    g.add_color_stop_rgba(1, *hx(col, 0))
+    c.arc(x, y, r, 0, 2 * math.pi)
+    c.set_source(g)
+    c.fill()
+
+
+def shadow(c, x, y, rx, ry, a=0.22):
+    ell(c, x, y, rx, ry)
+    c.set_source_rgba(0, 0, 0, a)
+    c.fill()
+
+
+def qpt(q, u, v):
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = q
+    tx, ty = lerp(x0, x1, u), lerp(y0, y1, u)
+    bx, by = lerp(x3, x2, u), lerp(y3, y2, u)
+    return lerp(tx, bx, v), lerp(ty, by, v)
+
+
+def subquad(q, u0, v0, u1, v1):
+    return [qpt(q, u0, v0), qpt(q, u1, v0), qpt(q, u1, v1), qpt(q, u0, v1)]
+
+
+class Layer:
+    """Paralaks katmanı: derinlik 0 = sabit (uzak), 1 = karakter düzlemi, >1 = ön plan."""
+
+    def __init__(self, c, pan, depth):
+        self.c, self.dx = c, -pan * depth
+
+    def __enter__(self):
+        self.c.save()
+        self.c.translate(self.dx, 0)
+
+    def __exit__(self, *a):
+        self.c.restore()
+
+
+def box(c, front, depth_vec, fill, top_fill=None, side_fill=None, lw=3):
+    """Önden görünen kutu + üst ve yan yüzey (perspektif hissi)."""
+    x, y, w, h = front
+    dx, dy = depth_vec
+    poly(c, [(x, y), (x + w, y), (x + w + dx, y + dy), (x + dx, y + dy)], top_fill or mix(fill, "#FFFFFF", 0.25), lw)
+    if dx > 0:
+        poly(c, [(x + w, y), (x + w + dx, y + dy), (x + w + dx, y + h + dy), (x + w, y + h)],
+             side_fill or mix(fill, "#000000", 0.2), lw)
+    elif dx < 0:
+        poly(c, [(x, y), (x + dx, y + dy), (x + dx, y + h + dy), (x, y + h)],
+             side_fill or mix(fill, "#000000", 0.2), lw)
+    rrect(c, x, y, w, h, 2)
+    fs(c, fill, lw)
+
+
+# ============================================================ karakter kadrosu
 KARAKTERLER = {
-    # kahraman: ampul kafalı "Curio" — kanalın maskotu
-    "hero": dict(head="#FFC94A", body="#3D5AFE", pants="#263046", shoes="#F4F4F4", extra="spark"),
-    "friend": dict(head="#FF8FA3", body="#16B79A", pants="#2E2A3F", shoes="#FFD166", extra="bun"),
-    "scientist": dict(head="#B9E3FF", body="#FFFFFF", pants="#4A4E69", shoes="#2B2D42", extra="glasses"),
-    "kid": dict(head="#C7F464", body="#FF6B35", pants="#1D3557", shoes="#FFFFFF", extra="cap"),
+    "hero": dict(shirt="#FFE8C2", jacket="#FF7B00", legs=SKIN, shoes="#F4F4F4", acc=None, scale=1.0),
+    "mom": dict(shirt="#FFFFFF", jacket="#E56B9B", legs=SKIN, shoes="#B5179E", acc="bun", scale=0.97),
+    "dad": dict(shirt="#CDE7B0", jacket="#3E6B48", legs="#2B2D42", shoes="#5C3D2E", acc="glasses", scale=1.05),
+    "friend": dict(shirt="#FFFFFF", jacket="#00A6A6", legs=SKIN, shoes="#FFD166", acc="cap", scale=1.0),
+    "scientist": dict(shirt="#9AD1FF", jacket="#F5F5F5", legs="#4A4E69", shoes="#2B2D42", acc="lab", scale=1.0),
+    "kid": dict(shirt="#E63946", jacket=None, legs="#1D3557", shoes="#FFFFFF", acc="propeller", scale=0.72),
+    "grandpa": dict(shirt="#F1E3D3", jacket="#8D6E63", legs="#5D4037", shoes="#3E2723", acc="whitehair", scale=0.95),
+    "girl": dict(shirt="#FFF0F6", jacket="#7B61FF", legs=SKIN, shoes="#FF6FB5", acc="bow", scale=0.88),
+    "astronaut": dict(shirt="#E9ECEF", jacket="#F8F9FA", legs="#E9ECEF", shoes="#ADB5BD", acc="helmet", scale=1.02),
 }
 
-# kol pozları: (üst kol açısı, dirsek açısı) — 0 = aşağı, + = dışa/yukarı
 POZLAR = {
-    "idle": ((12, 8), (12, 8)),
-    "explain": ((28, 55), (40, 75)),
-    "wave": ((12, 8), (150, 25)),
-    "point": ((12, 8), (95, 0)),
+    "idle": ((10, 6), (10, 6)),
+    "explain": ((26, 55), (38, 75)),
+    "wave": ((10, 6), (150, 25)),
+    "point": ((10, 6), (95, 0)),
     "shrug": ((48, 100), (48, 100)),
     "hands_up": ((160, 10), (160, 10)),
     "think": ((40, -100), (-20, -150)),
     "hips": ((40, -100), (40, -100)),
     "cheer": ((135, -20), (135, -20)),
-    "facepalm": ((12, 8), (-15, -160)),
+    "facepalm": ((10, 6), (-15, -160)),
+    "hug": ((70, 60), (70, 60)),
 }
 
+# ifade: (göz ölçeği, göz kapağı örtüsü, kapak eğimi (+ kızgın / - üzgün), göz bebeği ölçeği, ağız)
 IFADELER = {
-    # kaş açısı (+ = iç uç aşağı, kızgın), kaş yükseklik, göz bebeği ölçeği, ağız türü, göz yüksekliği
-    "neutral": (0, 0, 1.0, "smile_soft", 1.0),
-    "happy": (-6, 1.0, 1.0, "smile", 0.9),
-    "excited": (-10, 2.0, 1.1, "grin", 1.05),
-    "shocked": (-14, 3.5, 0.7, "o", 1.25),
-    "worried": (-18, 1.5, 0.9, "frown_wave", 1.05),
-    "thinking": (8, 0.5, 0.95, "flat", 0.9),
-    "sad": (-20, 0.5, 1.0, "frown", 0.95),
-    "angry": (22, -1.0, 0.85, "frown", 0.85),
-    "smug": (10, 0.0, 1.0, "smirk", 0.75),
+    "neutral": (1.0, 0.18, 0.0, 1.0, "line"),
+    "happy": (1.0, 0.0, 0.0, 1.0, "smile"),
+    "excited": (1.12, 0.0, 0.0, 1.05, "open_smile"),
+    "shocked": (1.25, 0.0, 0.0, 0.6, "o"),
+    "worried": (1.05, 0.25, -0.5, 0.9, "grimace"),
+    "thinking": (0.95, 0.3, -0.15, 0.95, "side"),
+    "sad": (1.0, 0.3, -0.6, 1.0, "frown"),
+    "angry": (0.95, 0.35, 0.7, 0.85, "grimace"),
+    "smug": (0.95, 0.5, 0.15, 1.0, "smirk"),
+    "scared": (1.2, 0.05, -0.4, 0.55, "grimace"),
+    "sleepy": (1.0, 0.65, 0.0, 1.0, "line"),
 }
 
 
-def arm_points(side, upper, elbow, sh):
+def arm_pts(side, upper, elbow, sh):
     a1 = math.radians(upper)
-    ex = sh[0] + side * 14 * math.sin(a1)
-    ey = sh[1] + 14 * math.cos(a1)
+    ex, ey = sh[0] + side * 13 * math.sin(a1), sh[1] + 13 * math.cos(a1)
     a2 = math.radians(upper + elbow)
-    hx_ = ex + side * 13 * math.sin(a2)
-    hy = ey + 13 * math.cos(a2)
-    return (sh, (ex, ey), (hx_, hy))
+    return [sh, (ex, ey), (ex + side * 12 * math.sin(a2), ey + 12 * math.cos(a2))]
+
+
+def draw_arm(c, p, pts):
+    col = p["jacket"] or p["shirt"]
+    ln(c, pts, 6.6, INK)
+    ln(c, pts, 4.4, col)
+    ell(c, pts[2][0], pts[2][1], 3.0, 3.0)
+    fs(c, "#ADB5BD" if p["acc"] == "helmet" else SKIN, 1.2 if p["acc"] == "helmet" else 0)
 
 
 def draw_character(c, kind, st):
-    """st: x, y, s, facing, expr, arms(L,R), mouth, eyes_open, look, leg, bob, lean, effects"""
     p = KARAKTERLER[kind]
+    t = st.get("t", 0)
     c.save()
     c.translate(st["x"], st["y"])
-    c.scale(st["s"] * st["facing"], st["s"])
+    sc = st["s"] * p["scale"]
+    c.scale(sc * st["facing"], sc)
     c.rotate(math.radians(st.get("lean", 0)))
     if st.get("spin"):
-        c.translate(0, -50)
+        c.translate(0, -48)
         c.rotate(math.radians(st["spin"]))
-        c.translate(0, 50)
-    lw = 2.3
+        c.translate(0, 48)
     bob = st.get("bob", 0)
+    lw = 1.7
 
-    # gölge
-    c.save()
-    ellipse(c, 0, 0.5, 17 - abs(bob) * 0.6, 3.2)
-    c.set_source_rgba(0, 0, 0, 0.16)
-    c.fill()
-    c.restore()
-
-    # bacaklar
     leg = st.get("leg", 0)
     for side, ph in ((-1, 1), (1, -1)):
-        hip = (side * 6, -14 + bob)
-        ang = math.radians(leg * ph)
-        foot = (hip[0] + 14 * math.sin(ang), hip[1] + 14 * math.cos(ang))
-        line(c, [hip, foot], 6.5, INK)
-        line(c, [hip, foot], 4.2, hx(p["pants"]))
-        ellipse(c, foot[0] + 2.2, foot[1] - 0.3, 5.2, 3.0)
-        fill_stroke(c, hx(p["shoes"]), lw * 0.8)
+        hip = (side * 5, -16 + bob)
+        a = math.radians(leg * ph)
+        foot = (hip[0] + 15 * math.sin(a), hip[1] + 15.5 * math.cos(a))
+        if p["legs"] == SKIN:
+            ln(c, [hip, foot], 3.4, SKIN)
+        else:
+            ln(c, [hip, foot], 6.2, INK)
+            ln(c, [hip, foot], 4.0, p["legs"])
+        ell(c, foot[0] + side * 1.5 + 1.2, foot[1] - 0.6, 4.6, 2.6)
+        fs(c, p["shoes"], 1.4)
 
-    # arka kol (sol)
-    sh_l, sh_r = (-13, -46 + bob), (13, -46 + bob)
+    sh_l, sh_r = (-11, -45 + bob), (11, -45 + bob)
     (ul, el), (ur, er) = st["arms"]
-    for side, sh, (u, e) in ((-1, sh_l, (ul, el)),):
-        pts = arm_points(side, u, e, sh)
-        line(c, pts, 7.2, INK)
-        line(c, pts, 4.8, hx(p["body"]))
-        ellipse(c, pts[2][0], pts[2][1], 3.6, 3.6)
-        fill_stroke(c, hx(p["head"]), lw * 0.8)
+    draw_arm(c, p, arm_pts(-1, ul, el, sh_l))
 
-    # gövde
     c.save()
     c.translate(0, bob)
-    c.move_to(-12, -51)
-    c.curve_to(-17, -40, -17, -22, -15, -12)
-    c.line_to(15, -12)
-    c.curve_to(17, -22, 17, -40, 12, -51)
-    c.curve_to(5, -54, -5, -54, -12, -51)
+    c.move_to(-10, -48)
+    c.curve_to(-14, -40, -14, -24, -13, -15)
+    c.line_to(13, -15)
+    c.curve_to(14, -24, 14, -40, 10, -48)
+    c.curve_to(4, -50, -4, -50, -10, -48)
     c.close_path()
-    fill_stroke(c, hx(p["body"]), lw)
-    if kind == "scientist":   # önlük yakası ve düğmeler
-        line(c, [(-5, -51), (0, -40), (5, -51)], 1.6)
-        for yy in (-34, -26, -18):
-            ellipse(c, 0, yy, 1.1, 1.1)
-            fill_stroke(c, INK)
-    else:                      # kapüşon cebi
-        rrect(c, -8, -27, 16, 8, 3)
-        c.set_source_rgba(0, 0, 0, 0.12)
-        c.fill()
-        line(c, [(-3, -50), (-3, -41)], 1.3, (1, 1, 1, 0.8))
-        line(c, [(3, -50), (3, -41)], 1.3, (1, 1, 1, 0.8))
+    fs(c, p["shirt"], lw)
+    if p["jacket"]:
+        for side in (-1, 1):
+            c.move_to(side * 3.2, -49)
+            c.curve_to(side * 9, -50, side * 14, -44, side * 14.2, -36)
+            c.curve_to(side * 14.5, -26, side * 14, -18, side * 13.5, -14)
+            c.line_to(side * 3.6, -14)
+            c.curve_to(side * 4.5, -26, side * 3.0, -40, side * 3.2, -49)
+            c.close_path()
+            fs(c, p["jacket"], lw)
+        if p["acc"] == "lab":
+            for yy in (-38, -30, -22):
+                ell(c, 4.6, yy, 0.9, 0.9)
+                fs(c, INK)
+            rrect(c, 6.5, -30, 5, 6, 1)
+            fs(c, "#DDE3EA", 1)
+    if p["acc"] == "helmet":
+        rrect(c, -6, -42, 12, 9, 2)
+        fs(c, "#4DABF7", 1.2)
     c.restore()
 
-    # baş
-    hy = -72 + bob * 1.2
+    hy = -68 + bob * 1.15
+    eye_s, lid, tilt, pup, mouth = IFADELER.get(st["expr"], IFADELER["neutral"])
     eo = st.get("eyes_open", 1.0)
-    brow_a, brow_up, pup, mouth_kind, eye_h = IFADELER[st["expr"]]
-
-    if p["extra"] == "spark":     # ampul kıvrımı + parıltı
-        t = st.get("t", 0)
-        line(c, [(0, hy - 22), (2, hy - 27), (-1.5, hy - 30), (1.5, hy - 33)], 2.2)
-        glow = 0.5 + 0.5 * math.sin(t * 5)
-        ellipse(c, 1.5, hy - 35, 3.2 + glow * 0.6, 3.2 + glow * 0.6)
-        fill_stroke(c, hx("#FFF3B0"), 1.6)
-    if p["extra"] == "bun":
-        ellipse(c, 0, hy - 23, 7, 6)
-        fill_stroke(c, hx("#7B2D43"), lw)
-    ellipse(c, 0, hy, 22, 21.5)
-    fill_stroke(c, hx(p["head"]), lw)
-    # yanak
-    for sx in (-13, 13):
-        ellipse(c, sx, hy + 6, 3.8, 2.3)
-        c.set_source_rgba(1, 0.45, 0.45, 0.28)
-        c.fill()
-    if p["extra"] == "cap":
-        c.move_to(-21, hy - 6)
-        c.curve_to(-20, hy - 26, 20, hy - 26, 21, hy - 6)
+    if p["acc"] == "bun":
+        ell(c, 0, hy - 21, 7.5, 6.5)
+        fs(c, "#2A2A2A", lw)
+    if p["acc"] == "bow":
+        for s2 in (-1, 1):
+            ell(c, s2 * 15, hy - 3, 4.2, 9.5)
+            fs(c, "#2A2A2A", lw)
+    ell(c, 0, hy, 20.5, 19.5)
+    fs(c, SKIN)
+    ell(c, -8, hy - 10, 6, 3.5)
+    c.set_source_rgba(1, 1, 1, 0.08)
+    c.fill()
+    if p["acc"] == "whitehair":
+        for s2 in (-1, 1):
+            ell(c, s2 * 18.5, hy - 6, 4.5, 6)
+            fs(c, "#F1F3F5", 1.2)
+    if p["acc"] == "cap":
+        c.move_to(-19.5, hy - 5)
+        c.curve_to(-18, hy - 25, 18, hy - 25, 19.5, hy - 5)
         c.close_path()
-        fill_stroke(c, hx("#E63946"), lw)
-        rrect(c, 8, hy - 9, 20, 5, 2.5)
-        fill_stroke(c, hx("#E63946"), lw)
-    if p["extra"] == "glasses":
-        for sx in (-8, 8):  # gri saç tutamları
-            pass
-        line(c, [(-20, hy - 12), (-24, hy - 18)], 3, hx("#9AA0A6"))
-        line(c, [(20, hy - 12), (24, hy - 18)], 3, hx("#9AA0A6"))
+        fs(c, "#E63946", lw)
+        rrect(c, 4, hy - 8, 20, 4.5, 2.2)
+        fs(c, "#E63946", lw)
+    if p["acc"] == "propeller":
+        c.move_to(-19, hy - 6)
+        c.curve_to(-17, hy - 24, 17, hy - 24, 19, hy - 6)
+        c.close_path()
+        fs(c, "#4361EE", lw)
+        ln(c, [(0, hy - 19), (0, hy - 25)], 1.6)
+        w2 = 9 * abs(math.cos(t * 14))
+        ln(c, [(-w2, hy - 26), (w2, hy - 26)], 2.6, "#FFD60A")
+    if p["acc"] == "bow":
+        for s2 in (-1, 1):
+            poly(c, [(8, hy - 17), (8 + s2 * 7, hy - 22), (8 + s2 * 7, hy - 12)], "#FF6FB5", 1.2)
 
-    # gözler
     lx, ly = st.get("look", (0, 0))
-    for sx in (-8, 8):
-        ey = hy - 2
-        ry = 7.5 * eye_h * eo
-        ellipse(c, sx, ey, 6.0, max(ry, 0.6))
-        fill_stroke(c, (1, 1, 1, 1), lw * 0.75)
-        if eo > 0.25:
-            ellipse(c, sx + lx * 1.8, ey + ly * 1.8, 3.1 * pup, 3.1 * pup * min(1, eo * 1.3))
-            fill_stroke(c, INK)
-            ellipse(c, sx + lx * 1.8 + 1.0, ey + ly * 1.8 - 1.2, 0.9, 0.9)
-            fill_stroke(c, (1, 1, 1, 1))
-    if p["extra"] == "glasses":
-        for sx in (-8, 8):
-            ellipse(c, sx, hy - 2, 7.8, 7.8)
-            c.set_source_rgba(*INK, 1)
-            c.set_line_width(1.6)
-            c.stroke()
-        line(c, [(-0.5, hy - 3), (0.5, hy - 3)], 1.6)
-
-    # kaşlar
     for side in (-1, 1):
-        bx, by = side * 8, hy - 13 - brow_up
-        a = math.radians(brow_a) * side
-        dx, dy = 4.6 * math.cos(a), 4.6 * math.sin(a)
-        line(c, [(bx - dx, by + dy), (bx + dx, by - dy)], 2.6)
-
-    # ağız
-    my = hy + 9
-    m = st.get("mouth", 0.0)
-    if m > 0.06:
-        w = 6.8 - m * 1.2 if mouth_kind != "grin" else 8
-        h = 1.6 + 6.2 * m
-        if mouth_kind == "o":
-            w, h = 4.2 + m, 4.5 + 4 * m
-        ellipse(c, 0, my + h * 0.25, w, h)
-        fill_stroke(c, hx("#6B1D2E"), lw * 0.8)
-        if h > 3.5:
+        ex, ey = side * 7.4, hy - 1.5
+        rx, ry = 6.4 * eye_s, 8.2 * eye_s * eo
+        if st["expr"] == "happy" and eo > 0.5:
+            c.move_to(ex - rx * 0.9, ey + 2)
+            c.curve_to(ex - rx * 0.5, ey - 5, ex + rx * 0.5, ey - 5, ex + rx * 0.9, ey + 2)
+            c.set_line_width(2.6)
+            setc(c, "#FFFFFF")
+            c.set_line_cap(cairo.LINE_CAP_ROUND)
+            c.stroke()
+            continue
+        ell(c, ex, ey, rx, max(ry, 0.7))
+        fs(c, "#FFFFFF")
+        if eo > 0.3:
+            ell(c, ex + lx * 2.2 * eye_s, ey + ly * 2.6 * eye_s + 0.8, 2.5 * pup, 2.5 * pup)
+            fs(c, INK)
+        cover = lid if eo > 0.3 else 0
+        if cover > 0 or tilt:
+            yt = ey - ry
             c.save()
-            ellipse(c, 0, my + h * 0.25, w, h)
+            ell(c, ex, ey, rx + 0.3, max(ry, 0.7) + 0.3)
             c.clip()
-            ellipse(c, 0, my + h * 1.05, w * 0.7, h * 0.5)
-            c.set_source_rgba(*hx("#FF7A8A"))
-            c.fill()
+            d = tilt * 6
+            yl = yt + cover * 2 * ry
+            inner_y, outer_y = yl + d, yl - d       # + eğim: iç uç aşağı (kızgın)
+            if side < 0:
+                pts = [(ex - rx - 1, yt - 4), (ex + rx + 1, yt - 4), (ex + rx + 1, inner_y), (ex - rx - 1, outer_y)]
+            else:
+                pts = [(ex - rx - 1, yt - 4), (ex + rx + 1, yt - 4), (ex + rx + 1, outer_y), (ex - rx - 1, inner_y)]
+            poly(c, pts, SKIN)
             c.restore()
+    if p["acc"] == "glasses":
+        for side in (-1, 1):
+            rrect(c, side * 7.4 - 7.4, hy - 9.5, 14.8, 15, 4)
+            setc(c, "#E9ECEF")
+            c.set_line_width(1.5)
+            c.stroke()
+    if p["acc"] == "lab":
+        for side in (-1, 1):
+            ell(c, side * 7.4, hy - 1.5, 8, 8)
+            setc(c, "#E9ECEF")
+            c.set_line_width(1.3)
+            c.stroke()
+        for s2 in (-1, 1):
+            ell(c, s2 * 18, hy - 9, 4, 5)
+            fs(c, "#DEE2E6", 1.2)
+    if p["acc"] == "whitehair":
+        c.move_to(-8, hy + 9.5)
+        c.curve_to(-4, hy + 7, 4, hy + 7, 8, hy + 9.5)
+        c.curve_to(4, hy + 12, -4, hy + 12, -8, hy + 9.5)
+        fs(c, "#F1F3F5")
+
+    my = hy + 10
+    WH = "#FFFFFF"
+    c.set_line_cap(cairo.LINE_CAP_ROUND)
+    if mouth == "smile":
+        c.move_to(-6, my - 1)
+        c.curve_to(-3, my + 4, 3, my + 4, 6, my - 1)
+        setc(c, WH)
+        c.set_line_width(2.2)
+        c.stroke()
+    elif mouth == "open_smile":
+        c.move_to(-7, my - 2)
+        c.curve_to(-5, my + 7, 5, my + 7, 7, my - 2)
+        c.close_path()
+        fs(c, "#7A1F2B", 1.6, WH)
+        rrect(c, -5.5, my - 2, 11, 2.4, 1)
+        fs(c, WH)
+    elif mouth == "o":
+        ell(c, 0, my + 1.5, 3.6, 4.6)
+        fs(c, "#7A1F2B", 1.8, WH)
+    elif mouth == "grimace":
+        rrect(c, -7, my - 2.6, 14, 6, 2)
+        fs(c, WH, 1.0, INK)
+        ln(c, [(-6.5, my + 0.4), (6.5, my + 0.4)], 0.8)
+        for xx in (-3.5, 0, 3.5):
+            ln(c, [(xx, my - 2.4), (xx, my + 3.2)], 0.8)
+    elif mouth == "frown":
+        c.move_to(-5.5, my + 2.5)
+        c.curve_to(-2.5, my - 1.5, 2.5, my - 1.5, 5.5, my + 2.5)
+        setc(c, WH)
+        c.set_line_width(2.2)
+        c.stroke()
+    elif mouth == "smirk":
+        c.move_to(-4, my + 0.5)
+        c.curve_to(0, my + 1.5, 3, my + 0.5, 6, my - 2.5)
+        setc(c, WH)
+        c.set_line_width(2.2)
+        c.stroke()
+    elif mouth == "side":
+        ln(c, [(1, my + 0.5), (6, my - 0.5)], 2.0, WH)
     else:
-        if mouth_kind in ("smile", "smile_soft"):
-            depth = 4.5 if mouth_kind == "smile" else 2.8
-            c.move_to(-6, my)
-            c.curve_to(-3, my + depth, 3, my + depth, 6, my)
-            c.set_line_width(2.2)
-            c.set_source_rgba(*INK, 1)
-            c.stroke()
-        elif mouth_kind == "grin":
-            c.move_to(-8, my - 1)
-            c.curve_to(-5, my + 8, 5, my + 8, 8, my - 1)
-            c.close_path()
-            fill_stroke(c, hx("#6B1D2E"), lw * 0.8)
-            rrect(c, -6, my - 1, 12, 2.6, 1)
-            fill_stroke(c, (1, 1, 1, 1))
-        elif mouth_kind == "o":
-            ellipse(c, 0, my + 1.5, 4.0, 5.0)
-            fill_stroke(c, hx("#6B1D2E"), lw * 0.8)
-        elif mouth_kind == "frown":
-            c.move_to(-5.5, my + 3)
-            c.curve_to(-2.5, my - 1.5, 2.5, my - 1.5, 5.5, my + 3)
-            c.set_line_width(2.2)
-            c.set_source_rgba(*INK, 1)
-            c.stroke()
-        elif mouth_kind == "frown_wave":
-            line(c, [(-6, my + 2), (-3, my), (0, my + 2), (3, my), (6, my + 2)], 2.0)
-        elif mouth_kind == "smirk":
-            c.move_to(-5, my + 1)
-            c.curve_to(-1, my + 2, 3, my + 1, 6, my - 2.5)
-            c.set_line_width(2.2)
-            c.set_source_rgba(*INK, 1)
-            c.stroke()
-        else:
-            line(c, [(-4.5, my + 1), (4.5, my + 1)], 2.2)
+        ln(c, [(-4, my + 0.5), (4, my + 0.5)], 2.0, WH)
 
-    # ön kol (sağ)
-    pts = arm_points(1, ur, er, sh_r)
-    line(c, pts, 7.2, INK)
-    line(c, pts, 4.8, hx(p["body"]))
-    ellipse(c, pts[2][0], pts[2][1], 3.6, 3.6)
-    fill_stroke(c, hx(p["head"]), lw * 0.8)
+    if p["acc"] == "helmet":
+        ell(c, 0, hy, 27, 26)
+        c.set_source_rgba(0.75, 0.88, 1, 0.22)
+        c.fill_preserve()
+        setc(c, "#CED4DA")
+        c.set_line_width(2.4)
+        c.stroke()
+        c.move_to(-16, hy - 14)
+        c.curve_to(-12, hy - 20, -6, hy - 22, 0, hy - 22)
+        setc(c, (1, 1, 1, 0.7))
+        c.set_line_width(2.4)
+        c.stroke()
 
-    # efektler (karakterin yanında)
+    draw_arm(c, p, arm_pts(1, ur, er, sh_r))
     for ef, k in st.get("effects", []):
-        draw_effect(c, ef, k, hy, st.get("t", 0))
+        draw_effect(c, ef, k, hy, t)
     c.restore()
 
 
@@ -331,32 +441,32 @@ def draw_effect(c, ef, k, hy, t):
     if ef == "!":
         s = ease(k * 3) * (1 + 0.08 * math.sin(t * 18))
         c.save()
-        c.translate(26, hy - 26)
+        c.translate(25, hy - 25)
         c.scale(s, s)
         c.rotate(0.2)
         rrect(c, -2.4, -14, 4.8, 13, 2.4)
-        fill_stroke(c, hx("#FF3B30"), 1.6)
-        ellipse(c, 0, 4, 2.6, 2.6)
-        fill_stroke(c, hx("#FF3B30"), 1.6)
+        fs(c, "#FF3B30", 1.4)
+        ell(c, 0, 4, 2.6, 2.6)
+        fs(c, "#FF3B30", 1.4)
         c.restore()
     elif ef == "?":
         c.save()
-        c.translate(27, hy - 24 + 2 * math.sin(t * 3))
+        c.translate(26, hy - 22 + 2 * math.sin(t * 3))
         c.scale(ease(k * 3), ease(k * 3))
         c.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        c.set_font_size(20)
+        c.set_font_size(19)
         c.move_to(-6, 6)
         c.text_path("?")
-        fill_stroke(c, hx("#7C4DFF"), 1.5)
+        fs(c, "#FFD60A", 1.4)
         c.restore()
     elif ef == "sweat":
         yy = hy - 10 + (t * 14) % 10
-        c.move_to(23, yy - 6)
-        c.curve_to(27, yy, 27, yy + 4, 23, yy + 4)
-        c.curve_to(19, yy + 4, 19, yy, 23, yy - 6)
-        fill_stroke(c, hx("#7FD3FF"), 1.4)
+        c.move_to(22, yy - 6)
+        c.curve_to(26, yy, 26, yy + 4, 22, yy + 4)
+        c.curve_to(18, yy + 4, 18, yy, 22, yy - 6)
+        fs(c, "#7FD3FF", 1.2)
     elif ef == "sparkle":
-        for i, (sx, sy) in enumerate(((-30, hy - 20), (30, hy - 28), (34, hy + 4))):
+        for i, (sx, sy) in enumerate(((-28, hy - 18), (28, hy - 26), (32, hy + 4))):
             r = 3 + 2 * abs(math.sin(t * 4 + i * 2))
             c.save()
             c.translate(sx, sy)
@@ -366,322 +476,619 @@ def draw_effect(c, ef, k, hy, t):
                 c.line_to(r * 0.45 * math.cos(a + math.pi / 4), r * 0.45 * math.sin(a + math.pi / 4))
                 c.line_to(r * 2 * math.cos(a + math.pi / 2), r * 2 * math.sin(a + math.pi / 2))
             c.close_path()
-            fill_stroke(c, hx("#FFD60A"))
+            fs(c, "#FFD60A")
             c.restore()
+    elif ef == "speed":
+        for i in range(3):
+            yy = -58 + i * 17
+            ln(c, [(-28, yy), (-44 - 6 * math.sin(t * 20 + i), yy)], 2, (0, 0, 0, 0.45))
     elif ef == "zzz":
         c.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         for i in range(3):
             k2 = (t * 0.5 + i / 3) % 1
             c.save()
-            c.translate(22 + k2 * 18, hy - 22 - k2 * 40)
+            c.translate(20 + k2 * 18, hy - 22 - k2 * 40)
             c.set_font_size(8 + k2 * 10)
             c.move_to(0, 0)
             c.text_path("Z")
-            c.set_source_rgba(*hx("#7C4DFF", 1 - k2))
+            c.set_source_rgba(*hx("#4361EE", 1 - k2))
             c.fill()
             c.restore()
-    elif ef == "speed":
-        for i in range(3):
-            yy = -60 + i * 18
-            line(c, [(-30, yy), (-44 - 6 * math.sin(t * 20 + i), yy)], 2, (*INK[:3], 0.5))
-
-
-# ============================================================ arka planlar
-def bg_room(c, W, H, t, g, rnd):
-    c.rectangle(0, 0, W, g)
-    c.set_source_rgba(*hx("#F6D9B8"))
-    c.fill()
-    c.rectangle(0, g - 70, W, 70)
-    c.set_source_rgba(*hx("#E8C29C"))
-    c.fill()
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#B98B64"))
-    c.fill()
-    for i in range(0, int(W), 140):
-        line(c, [(i, g), (i - 60, H)], 2, hx("#A97C57"))
-    # pencere
-    wx, wy, ww, wh = W * 0.56, H * 0.14, W * 0.32, H * 0.22
-    rrect(c, wx, wy, ww, wh, 10)
-    fill_stroke(c, hx("#FFFFFF"), 8)
-    c.save()
-    rrect(c, wx + 10, wy + 10, ww - 20, wh - 20, 4)
-    c.clip()
-    vgrad(c, wx, wy, ww, wh, "#7EC8FF", "#CDEBFF")
-    cx = wx + ((t * 25) % (ww + 200)) - 100
-    for dx, dy, r in ((0, 60, 34), (38, 50, 42), (78, 64, 30)):
-        ellipse(c, cx + dx, wy + dy, r, r * 0.7)
-        c.set_source_rgba(1, 1, 1, 0.95)
-        c.fill()
-    c.restore()
-    line(c, [(wx + ww / 2, wy), (wx + ww / 2, wy + wh)], 6, hx("#FFFFFF"))
-    line(c, [(wx, wy + wh / 2), (wx + ww, wy + wh / 2)], 6, hx("#FFFFFF"))
-    for sx in (wx - 40, wx + ww - 10):
-        rrect(c, sx, wy - 30, 50, wh + 70, 20)
-        fill_stroke(c, hx("#F28B9B"), 3)
-    # raf ve kitaplar
-    sx, sy = W * 0.07, H * 0.2
-    rrect(c, sx, sy, W * 0.36, 14, 4)
-    fill_stroke(c, hx("#8D5B3B"), 3)
-    x = sx + 14
-    for col in ("#E63946", "#457B9D", "#F4A261", "#2A9D8F", "#8338EC", "#FFB703"):
-        h = 60 + rnd.randint(0, 40)
-        rrect(c, x, sy - h, 30, h, 4)
-        fill_stroke(c, hx(col), 3)
-        x += 36
-    # çerçeve
-    rrect(c, W * 0.1, H * 0.29, W * 0.2, H * 0.11, 6)
-    fill_stroke(c, hx("#FFFFFF"), 6)
-    c.save()
-    rrect(c, W * 0.1 + 10, H * 0.29 + 10, W * 0.2 - 20, H * 0.11 - 20, 3)
-    c.clip()
-    vgrad(c, 0, H * 0.29, W, H * 0.11, "#9AD0EC", "#E0F2FB")
-    c.move_to(W * 0.1, H * 0.4)
-    c.line_to(W * 0.17, H * 0.32)
-    c.line_to(W * 0.24, H * 0.38)
-    c.line_to(W * 0.3, H * 0.33)
-    c.line_to(W * 0.3, H * 0.4)
-    c.close_path()
-    c.set_source_rgba(*hx("#52B788"))
-    c.fill()
-    c.restore()
-
-
-def sky_clouds(c, W, H, t, top, bottom, g, speed=20, n=4, rnd=None):
-    vgrad(c, 0, 0, W, g, top, bottom)
-    for i in range(n):
-        y = H * (0.08 + 0.09 * i)
-        x = ((t * speed * (1 + i * 0.3) + i * W * 0.37) % (W + 400)) - 200
-        for dx, dy, r in ((0, 0, 50), (55, -18, 62), (115, 0, 46)):
-            ellipse(c, x + dx, y + dy, r, r * 0.68)
-            c.set_source_rgba(1, 1, 1, 0.92)
+    elif ef == "heart":
+        for i in range(2):
+            k2 = (t * 0.6 + i / 2) % 1
+            c.save()
+            c.translate(18 + i * 10, hy - 20 - k2 * 30)
+            c.scale(0.6 + k2 * 0.4, 0.6 + k2 * 0.4)
+            c.move_to(0, 4)
+            c.curve_to(-8, -2, -4, -9, 0, -4)
+            c.curve_to(4, -9, 8, -2, 0, 4)
+            c.set_source_rgba(*hx("#FF4D6D", 1 - k2))
             c.fill()
+            c.restore()
 
 
-def bg_park(c, W, H, t, g, rnd):
-    sky_clouds(c, W, H, t, "#6EC6FF", "#E3F6FF", g)
-    ellipse(c, W * 0.82, H * 0.12, 70, 70)
-    fill_stroke(c, hx("#FFD166"))
-    for hxp, hc, r in ((0.2, "#95D5B2", 520), (0.85, "#74C69D", 600)):
-        ellipse(c, W * hxp, g + 80, r, 260)
-        c.set_source_rgba(*hx(hc))
-        c.fill()
-    # ağaç
-    tx = W * 0.12
-    rrect(c, tx - 22, g - 330, 44, 330, 14)
-    fill_stroke(c, hx("#8D5B3B"), 4)
-    sway = 6 * math.sin(t * 1.3)
-    for dx, dy, r in ((0, -400, 120), (-80, -330, 90), (85, -330, 95)):
-        ellipse(c, tx + dx + sway, g + dy, r, r)
-        fill_stroke(c, hx("#40916C"), 4)
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#7BC96F"))
+# ============================================================ perspektifli iç mekân
+def room_shell(c, W, H, wall, side, floor, board, ceil):
+    """Tek kaçış noktalı oda. Arka duvar sınırlarını ve yan duvar dörtgenlerini döndürür."""
+    vx, vy = W / 2, H * 0.42
+    L, R, T, B = W * 0.12, W * 0.88, H * 0.06, H * 0.60
+    yb_edge = B + (B - vy) / (vx - L) * L
+    yt_edge = T - (vy - T) / (vx - L) * L
+    poly(c, [(-200, -10), (W + 200, -10), (W + 200, yt_edge), (R, T), (L, T), (-200, yt_edge)], ceil)
+    poly(c, [(L, T), (R, T), (R, B), (L, B)], wall)
+    g = cairo.RadialGradient(W / 2, H * 0.3, 50, W / 2, H * 0.3, W * 0.6)
+    g.add_color_stop_rgba(0, 1, 1, 1, 0.18)
+    g.add_color_stop_rgba(1, 1, 1, 1, 0)
+    c.rectangle(L, T, R - L, B - T)
+    c.set_source(g)
     c.fill()
-    for i in range(30):
-        x = (i * 97) % W
-        line(c, [(x, g + 40 + (i * 53) % 300), (x + 6, g + 22 + (i * 53) % 300)], 4, hx("#5FAF55"))
-
-
-def bg_city(c, W, H, t, g, rnd):
-    sky_clouds(c, W, H, t, "#8FD3FF", "#FFE8D6", g, n=3)
-    x = -20
-    while x < W:
-        bw = rnd.randint(140, 230)
-        bh = rnd.randint(int(H * 0.2), int(H * 0.42))
-        col = rnd.choice(["#5E6472", "#6C757D", "#495867", "#577590", "#4D5B6A"])
-        c.rectangle(x, g - bh, bw, bh)
-        fill_stroke(c, hx(col), 4)
-        for wy in range(int(g - bh + 30), int(g - 40), 55):
-            for wx in range(int(x + 22), int(x + bw - 30), 46):
-                c.rectangle(wx, wy, 24, 30)
-                c.set_source_rgba(*hx("#FFE29A" if rnd.random() < 0.4 else "#A9C4D9"))
-                c.fill()
-        x += bw + 12
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#9AA5B1"))
-    c.fill()
-    c.rectangle(0, g + 120, W, H - g)
-    c.set_source_rgba(*hx("#3F4A56"))
-    c.fill()
-    off = (t * 300) % 200
-    for i in range(-1, int(W / 200) + 2):
-        rrect(c, i * 200 - off, g + 250, 110, 16, 8)
-        c.set_source_rgba(*hx("#FFD166"))
-        c.fill()
-
-
-def bg_space(c, W, H, t, g, rnd):
-    vgrad(c, 0, 0, W, H, "#070B1F", "#1E2A5A")
-    for i in range(120):
-        x, y = rnd.random() * W, rnd.random() * g
-        a = 0.4 + 0.6 * abs(math.sin(t * (0.8 + rnd.random() * 2) + i))
-        ellipse(c, x, y, 2.4, 2.4)
-        c.set_source_rgba(1, 1, 1, a)
-        c.fill()
-    ellipse(c, W * 0.85, H * 0.1, 46, 46)
-    fill_stroke(c, hx("#F28482"))
+    poly(c, [(-200, yt_edge - 10), (L, T), (L, B), (-200, yb_edge + 40)], side)
+    poly(c, [(W + 200, yt_edge - 10), (R, T), (R, B), (W + 200, yb_edge + 40)], side)
+    floor_pts = [(L, B), (R, B), (W + 200, yb_edge + 40), (W + 200, H + 10), (-200, H + 10), (-200, yb_edge + 40)]
+    poly(c, floor_pts, floor)
     c.save()
-    c.translate(W * 0.85, H * 0.1)
-    c.rotate(-0.3)
-    ellipse(c, 0, 0, 80, 16)
-    c.set_source_rgba(*hx("#F6BD60"))
-    c.set_line_width(6)
-    c.stroke()
+    c.move_to(*floor_pts[0])
+    for p_ in floor_pts[1:]:
+        c.line_to(*p_)
+    c.close_path()
+    c.clip()
+    for i in range(-10, 11):
+        bx = vx + i * (R - L) / 10
+        ex_ = vx + (bx - vx) * (H - vy) / (B - vy)
+        ln(c, [(bx, B), (ex_, H)], 3, board)
+    for j in range(1, 7):
+        yy = B + (H - B) * (j / 7) ** 1.6
+        ln(c, [(-200, yy), (W + 200, yy)], 2, board)
+    g = cairo.LinearGradient(0, B, 0, B + 70)
+    g.add_color_stop_rgba(0, 0, 0, 0, 0.22)
+    g.add_color_stop_rgba(1, 0, 0, 0, 0)
+    c.rectangle(-200, B, W + 400, 70)
+    c.set_source(g)
+    c.fill()
     c.restore()
-    # ay yüzeyi
-    c.move_to(0, g)
-    c.curve_to(W * 0.3, g - 40, W * 0.7, g - 40, W, g)
-    c.line_to(W, H)
-    c.line_to(0, H)
-    c.close_path()
-    fill_stroke(c, hx("#B8BCC6"), 5)
-    for cx_, cy_, r in ((0.15, 120, 50), (0.55, 260, 70), (0.85, 160, 40), (0.35, 420, 60)):
-        ellipse(c, W * cx_, g + cy_, r, r * 0.35)
-        fill_stroke(c, hx("#9EA3AE"), 3)
+    edge = mix(side, "#000000", 0.3)
+    for a, b in (((L, T), (L, B)), ((R, T), (R, B)), ((L, B), (R, B)), ((L, T), (R, T)),
+                 ((L, B), (-200, yb_edge + 40)), ((R, B), (W + 200, yb_edge + 40))):
+        ln(c, [a, b], 3, edge)
+    left_wall = [(0, yt_edge), (L, T), (L, B), (0, yb_edge)]
+    right_wall = [(R, T), (W, yt_edge), (W, yb_edge), (R, B)]
+    return (L, T, R, B), left_wall, right_wall
 
 
-def bg_ocean(c, W, H, t, g, rnd):
-    vgrad(c, 0, 0, W, H, "#4CC9F0", "#0B3C78")
-    for i in range(5):
-        x = W * (0.1 + i * 0.22) + 40 * math.sin(t * 0.5 + i)
-        c.move_to(x, 0)
-        c.line_to(x + 90, 0)
-        c.line_to(x + 220, g)
-        c.line_to(x + 120, g)
-        c.close_path()
-        c.set_source_rgba(1, 1, 1, 0.06)
-        c.fill()
-    for i in range(18):
-        bx = (i * 173) % W + 10 * math.sin(t * 2 + i)
-        by = H - ((t * (60 + i * 7) + i * 140) % H)
-        ellipse(c, bx, by, 9 + i % 4 * 3, 9 + i % 4 * 3)
-        c.set_source_rgba(1, 1, 1, 0.5)
-        c.set_line_width(3)
-        c.stroke()
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#E9D8A6"))
-    c.fill()
-    for i, sx in enumerate((0.06, 0.16, 0.82, 0.93)):
-        x0 = W * sx
-        pts = []
-        for k in range(9):
-            pts.append((x0 + 22 * math.sin(t * 1.6 + k * 0.7 + i), g - k * 55))
-        line(c, pts, 18, hx("#2D6A4F"))
-
-
-def bg_lab(c, W, H, t, g, rnd):
-    c.rectangle(0, 0, W, g)
-    c.set_source_rgba(*hx("#E7EEF5"))
-    c.fill()
-    rrect(c, W * 0.08, H * 0.1, W * 0.5, H * 0.2, 10)
-    fill_stroke(c, hx("#FFFFFF"), 8, hx("#8D99AE"))
-    for i in range(4):
-        y = H * 0.14 + i * 55
-        line(c, [(W * 0.13, y), (W * (0.3 + 0.05 * i), y)], 6, hx("#3A86FF"))
-    ellipse(c, W * 0.47, H * 0.2, 50, 50)
-    c.set_source_rgba(*hx("#EF476F"))
-    c.set_line_width(6)
+def window(c, x, y, w, h, t, night=False):
+    rrect(c, x - 10, y - 10, w + 20, h + 20, 8)
+    fs(c, "#FFFFFF", 3)
+    c.save()
+    rrect(c, x, y, w, h, 4)
+    c.clip()
+    if night:
+        vgrad(c, x, y, w, h, "#0D1B2A", "#33415C")
+        ell(c, x + w * 0.7, y + h * 0.3, 22, 22)
+        fs(c, "#F8F3D4")
+    else:
+        vgrad(c, x, y, w, h, "#7EC8FF", "#D7F0FF")
+        cx = x + ((t * 18) % (w + 220)) - 110
+        for dx, dy, r in ((0, h * 0.35, 30), (34, h * 0.3, 38), (70, h * 0.37, 26)):
+            ell(c, cx + dx, y + dy, r, r * 0.65)
+            c.set_source_rgba(1, 1, 1, 0.95)
+            c.fill()
+        ell(c, x + w * 0.3, y + h * 1.1, w * 0.8, h * 0.35)
+        fs(c, "#8FD694")
+    c.restore()
+    ln(c, [(x + w / 2, y), (x + w / 2, y + h)], 5, "#FFFFFF")
+    ln(c, [(x, y + h / 2), (x + w, y + h / 2)], 5, "#FFFFFF")
+    rrect(c, x, y, w, h, 4)
+    setc(c, INK)
+    c.set_line_width(3)
     c.stroke()
-    rrect(c, W * 0.64, H * 0.24, W * 0.3, 14, 4)
-    fill_stroke(c, hx("#8D99AE"), 3)
-    for i, col in enumerate(("#06D6A0", "#FFD166", "#EF476F")):
-        x = W * 0.67 + i * 100
-        c.move_to(x, H * 0.24)
-        c.line_to(x + 10, H * 0.24 - 80)
-        c.line_to(x + 40, H * 0.24 - 80)
-        c.line_to(x + 50, H * 0.24)
+
+
+def potted_plant(c, x, y, s, t):
+    c.save()
+    c.translate(x, y)
+    c.scale(s, s)
+    for i, a in enumerate((-0.6, -0.25, 0.1, 0.45, 0.8)):
+        c.save()
+        c.rotate(a + 0.05 * math.sin(t * 1.3 + i))
+        c.move_to(0, -40)
+        c.curve_to(-22, -90, -10, -140, 0, -160)
+        c.curve_to(10, -140, 22, -90, 0, -40)
+        fs(c, "#2D6A4F" if i % 2 else "#40916C", 3)
+        c.restore()
+    poly(c, [(-45, -45), (45, -45), (34, 40), (-34, 40)], "#C8553D", 4)
+    c.restore()
+
+
+# ============================================================ mekânlar
+def bg_bedroom(c, W, H, t, rnd, pan):
+    with Layer(c, pan, 0.25):
+        (L, T, R, B), lw_, rw_ = room_shell(c, W, H, "#F3D2C1", "#E3B9A6", "#B07D58", "#97664A", "#F8E1D4")
+        window(c, W * 0.5, H * 0.13, W * 0.26, H * 0.17, t)
+        for sx in (W * 0.47, W * 0.76):
+            rrect(c, sx - 12, H * 0.1, 50, H * 0.25, 18)
+            fs(c, "#5E60CE", 3)
+        q = subquad(lw_, 0.3, 0.22, 0.85, 0.5)
+        poly(c, q, "#FFFFFF", 3)
+        poly(c, subquad(q, 0.12, 0.12, 0.88, 0.88), "#FFB703")
+        poly(c, subquad(q, 0.3, 0.4, 0.7, 0.88), "#FB8500")
+        box(c, (W * 0.15, B - 40, W * 0.28, 110), (-40, 40), "#4CC9F0", lw=3)
+        rrect(c, W * 0.15, B - 120, W * 0.05, 90, 8)
+        fs(c, "#8D5B3B", 3)
+        rrect(c, W * 0.21, B - 62, W * 0.08, 30, 12)
+        fs(c, "#FFFFFF", 3)
+        glow(c, W * 0.86, B - 190, 220, "#FFE066", 0.45)
+        box(c, (W * 0.8, B - 80, 130, 140), (40, 30), "#A47148", lw=3)
+        poly(c, [(W * 0.82, B - 230), (W * 0.9, B - 230), (W * 0.92, B - 170), (W * 0.8, B - 170)], "#FFD166", 3)
+        ln(c, [(W * 0.86, B - 170), (W * 0.86, B - 82)], 5)
+    with Layer(c, pan, 0.6):
+        ell(c, W * 0.5, H * 0.8, W * 0.44, H * 0.06)
+        fs(c, "#E76F51", 4)
+        ell(c, W * 0.5, H * 0.8, W * 0.34, H * 0.045)
+        setc(c, "#F4A261")
+        c.set_line_width(8)
+        c.stroke()
+    with Layer(c, pan, 1.5):
+        potted_plant(c, -10, H * 0.98, 2.2, t)
+
+
+def bg_kitchen(c, W, H, t, rnd, pan):
+    with Layer(c, pan, 0.25):
+        (L, T, R, B), lw_, rw_ = room_shell(c, W, H, "#E9F5DB", "#CFE1B9", "#D4A373", "#BC8A5F", "#F6FBEF")
+        c.save()
+        c.rectangle(L, H * 0.33, R - L, B - H * 0.33)
+        c.clip()
+        for yy in range(int(H * 0.33), int(B), 48):
+            ln(c, [(L, yy), (R, yy)], 2, "#C9DDB3")
+        for xx in range(int(L), int(R), 48):
+            ln(c, [(xx, H * 0.33), (xx, B)], 2, "#C9DDB3")
+        c.restore()
+        for i in range(3):
+            rrect(c, L + 20 + i * 180, H * 0.1, 165, H * 0.13, 6)
+            fs(c, "#F28482", 3)
+            ell(c, L + 102 + i * 180, H * 0.215, 8, 4)
+            fs(c, INK)
+        box(c, (L - 10, B - 120, W * 0.56, 150), (0, -24), "#84A59D", top_fill="#EDEDE9", lw=3)
+        for i in range(3):
+            rrect(c, L + 15 + i * 190, B - 100, 175, 120, 6)
+            setc(c, "#52796F")
+            c.set_line_width(3)
+            c.stroke()
+        ell(c, W * 0.32, B - 140, 60, 16)
+        fs(c, "#343A40", 3)
+        for i in range(3):
+            k = (t * 0.6 + i / 3) % 1
+            ell(c, W * 0.32 + 15 * math.sin(t * 2 + i), B - 170 - k * 120, 16 + k * 20, 12 + k * 16)
+            c.set_source_rgba(1, 1, 1, 0.6 * (1 - k))
+            c.fill()
+        box(c, (W * 0.72, H * 0.24, 190, B - H * 0.24 + 50), (-34, 22), "#F8F9FA", lw=3)
+        ln(c, [(W * 0.72, H * 0.4), (W * 0.72 + 190, H * 0.4)], 3)
+        rrect(c, W * 0.72 + 16, H * 0.29, 9, 60, 4)
+        fs(c, "#ADB5BD", 2)
+    with Layer(c, pan, 1.5):
+        potted_plant(c, W + 20, H * 0.98, 2.0, t)
+
+
+def bg_classroom(c, W, H, t, rnd, pan):
+    with Layer(c, pan, 0.25):
+        (L, T, R, B), lw_, rw_ = room_shell(c, W, H, "#FFF3B0", "#F2E19B", "#9C6644", "#7F5539", "#FFFBE6")
+        rrect(c, W * 0.2, H * 0.14, W * 0.6, H * 0.21, 8)
+        fs(c, "#2D6A4F", 10, "#8D5B3B")
+        for i in range(3):
+            ln(c, [(W * 0.26, H * 0.19 + i * 60), (W * (0.45 + 0.08 * i), H * 0.19 + i * 60)], 5, (1, 1, 1, 0.85))
+        ell(c, W * 0.66, H * 0.25, 45, 45)
+        setc(c, (1, 1, 1, 0.85))
+        c.set_line_width(5)
+        c.stroke()
+        ell(c, W * 0.5, H * 0.085, 32, 32)
+        fs(c, "#FFFFFF", 4)
+        a = t * 1.2
+        ln(c, [(W * 0.5, H * 0.085), (W * 0.5 + 22 * math.sin(a), H * 0.085 - 22 * math.cos(a))], 3)
+        q = subquad(lw_, 0.3, 0.25, 0.9, 0.55)
+        poly(c, q, "#A8DADC", 3)
+        poly(c, subquad(q, 0.2, 0.2, 0.55, 0.7), "#80B918")
+        for row, (yy, s) in enumerate(((B + 20, 0.55), (B + 95, 0.72))):
+            for col in range(3):
+                x = W * (0.18 + col * 0.25) - row * 20
+                box(c, (x, yy - 60 * s, 170 * s, 50 * s), (0, -22 * s), "#E9C46A", lw=3)
+                ln(c, [(x + 10, yy - 10 * s), (x + 10, yy + 40 * s)], 4)
+                ln(c, [(x + 160 * s, yy - 10 * s), (x + 160 * s, yy + 40 * s)], 4)
+    with Layer(c, pan, 1.5):
+        potted_plant(c, -20, H * 0.99, 2.0, t)
+
+
+def bg_lab(c, W, H, t, rnd, pan):
+    with Layer(c, pan, 0.25):
+        (L, T, R, B), lw_, rw_ = room_shell(c, W, H, "#E7EEF5", "#D3DDE7", "#B8C4CF", "#A3B0BD", "#F4F7FA")
+        for i in range(2):
+            yy = H * (0.2 + i * 0.15)
+            rrect(c, W * 0.17, yy, W * 0.36, 12, 4)
+            fs(c, "#8D99AE", 3)
+            for k, col in enumerate(("#06D6A0", "#FFD166", "#EF476F", "#4CC9F0")):
+                x = W * 0.19 + k * 92
+                poly(c, [(x, yy), (x + 10, yy - 70), (x + 34, yy - 70), (x + 44, yy)], hx(col, 0.85), 3)
+                by = yy - 80 - ((t * 35 + k * 25 + i * 10) % 60)
+                ell(c, x + 22, by, 6, 6)
+                c.set_source_rgba(*hx(col, 0.6))
+                c.fill()
+        glow(c, W * 0.72, H * 0.21, 280, "#4CC9F0", 0.22)
+        rrect(c, W * 0.6, H * 0.14, W * 0.24, H * 0.14, 8)
+        fs(c, "#1B263B", 4)
+        pts = [(W * 0.62 + i * 15, H * 0.21 + 40 * math.sin(i * 0.6 + t * 4)) for i in range(16)]
+        ln(c, pts, 4, "#06D6A0")
+        box(c, (W * 0.58, B - 60, W * 0.3, 90), (-30, 30), "#ADB5BD", top_fill="#F8F9FA", lw=3)
+        for k in range(3):
+            ell(c, W * 0.64 + k * 90, B - 82, 18, 24)
+            fs(c, hx(("#F72585", "#7209B7", "#3A0CA3")[k], 0.8), 3)
+    with Layer(c, pan, 1.5):
+        poly(c, [(W * 0.82, H), (W * 0.86, H * 0.86), (W * 0.94, H * 0.86), (W * 0.98, H)], hx("#06D6A0", 0.85), 4)
+        glow(c, W * 0.9, H * 0.93, 140, "#06D6A0", 0.3)
+
+
+def bg_street(c, W, H, t, rnd, pan):
+    vx, vy = W / 2, H * 0.44
+    with Layer(c, pan, 0.05):
+        vgrad(c, -200, 0, W + 400, vy + 10, "#74C0FC", "#FFE5D9")
+        for i in range(3):
+            x = ((t * 15 * (1 + i * 0.4) + i * 380) % (W + 500)) - 250
+            for dx, dy, r in ((0, 0, 40), (45, -14, 52), (95, 0, 38)):
+                ell(c, x + dx, H * (0.07 + 0.06 * i) + dy, r, r * 0.65)
+                c.set_source_rgba(1, 1, 1, 0.9)
+                c.fill()
+    with Layer(c, pan, 0.15):
+        x = -200
+        while x < W + 200:
+            bw, bh = rnd.randint(50, 90), rnd.randint(60, 200)
+            c.rectangle(x, vy - bh, bw, bh)
+            setc(c, mix("#6C8EAD", "#FFE5D9", 0.45))
+            c.fill()
+            x += bw + 4
+    with Layer(c, pan, 0.45):
+        poly(c, [(vx - 30, vy), (vx + 30, vy), (W + 300, H), (-300, H)], "#495057")
+        poly(c, [(vx - 30, vy), (vx - 60, vy), (-800, H), (-300, H)], "#ADB5BD")
+        poly(c, [(vx + 30, vy), (vx + 60, vy), (W + 800, H), (W + 300, H)], "#ADB5BD")
+        for j in range(8):
+            ph = (t * 1.2) % 1
+            k0, k1 = ((j + ph) / 8) ** 2, ((j + 0.45 + ph) / 8) ** 2
+            y0, y1 = lerp(vy, H, k0), lerp(vy, H, k1)
+            w0, w1 = lerp(2, 18, k0), lerp(2, 18, k1)
+            poly(c, [(vx - w0, y0), (vx + w0, y0), (vx + w1, y1), (vx - w1, y1)], "#FFD43B")
+        cols = ["#E76F51", "#2A9D8F", "#F4A261", "#457B9D", "#E9C46A", "#6D597A"]
+        for side in (-1, 1):
+            edges = [0.0, 0.3, 0.52, 0.68]
+            for i in range(3):
+                a, b = edges[i], edges[i + 1]
+                ka, kb = 1 - a, 1 - b
+                xa, xb = vx + side * W * 0.8 * ka, vx + side * W * 0.8 * kb
+                ya, yb = lerp(vy, H, ka) - 120 * ka, lerp(vy, H, kb) - 120 * kb
+                ha, hb = H * 0.6 * ka + 30, H * 0.6 * kb + 30
+                q = [(xa, ya - ha), (xb, yb - hb), (xb, yb), (xa, ya)]
+                if side > 0:
+                    q = [q[1], q[0], q[3], q[2]]
+                poly(c, q, cols[i + (3 if side > 0 else 0)], 3)
+                for r_ in range(4):
+                    for k_ in range(3):
+                        wq = subquad(q, 0.12 + k_ * 0.29, 0.1 + r_ * 0.21, 0.3 + k_ * 0.29, 0.24 + r_ * 0.21)
+                        poly(c, wq, "#FFE8A3" if (r_ + k_ + i) % 3 == 0 else "#BDE0FE", 2)
+    with Layer(c, pan, 1.5):
+        x = -30
+        ln(c, [(x + 60, H + 10), (x + 60, H * 0.38), (x + 140, H * 0.36)], 16, "#343A40")
+        glow(c, x + 160, H * 0.37, 160, "#FFE066", 0.35)
+        ell(c, x + 160, H * 0.37, 26, 14)
+        fs(c, "#FFE066", 4)
+
+
+def bg_park(c, W, H, t, rnd, pan):
+    hz = H * 0.5
+    with Layer(c, pan, 0.03):
+        vgrad(c, -200, 0, W + 400, hz, "#4DABF7", "#E7F5FF")
+        glow(c, W * 0.8, H * 0.1, 220, "#FFF3BF", 0.8)
+        ell(c, W * 0.8, H * 0.1, 70, 70)
+        fs(c, "#FFE066")
+    with Layer(c, pan, 0.08):
+        for i in range(3):
+            x = ((t * 16 * (1 + i * 0.3) + i * 400) % (W + 500)) - 250
+            for dx, dy, r in ((0, 0, 46), (52, -16, 58), (110, 0, 42)):
+                ell(c, x + dx, H * (0.08 + 0.07 * i) + dy, r, r * 0.65)
+                c.set_source_rgba(1, 1, 1, 0.92)
+                c.fill()
+    with Layer(c, pan, 0.12):
+        c.move_to(-300, hz)
+        for i in range(9):
+            c.line_to(-300 + i * 220 + 110, hz - 180 - (i * 53) % 120)
+            c.line_to(-300 + (i + 1) * 220, hz - 40)
+        c.line_to(W + 300, hz)
         c.close_path()
-        fill_stroke(c, hx(col, 0.85), 4)
-        by = H * 0.24 - 90 - ((t * 40 + i * 30) % 60)
-        ellipse(c, x + 25, by, 7, 7)
-        c.set_source_rgba(*hx(col, 0.7))
-        c.fill()
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#C5D0DB"))
-    c.fill()
-    for i in range(0, int(W), 120):
-        line(c, [(i, g), (i, H)], 3, hx("#AEBBC8"))
+        fs(c, "#A5C8E4")
+    with Layer(c, pan, 0.25):
+        ell(c, W * 0.15, hz + 30, 600, 160)
+        fs(c, "#9BD49A")
+        ell(c, W * 0.9, hz + 40, 650, 170)
+        fs(c, "#86C98A")
+        for i in range(8):
+            ell(c, -150 + i * 190, hz - 25, 42, 52)
+            fs(c, "#52B788", 2)
+    with Layer(c, pan, 0.5):
+        poly(c, [(-300, hz + 20), (W + 300, hz + 20), (W + 300, H + 10), (-300, H + 10)], "#74C365")
+        poly(c, [(W / 2 - 20, hz + 20), (W / 2 + 20, hz + 20), (W * 0.95, H + 10), (W * 0.05, H + 10)], "#E9D8A6")
+        for x in (W * 0.06, W * 0.92):
+            rrect(c, x - 26, H * 0.36, 52, H * 0.3, 16)
+            fs(c, "#8D5B3B", 4)
+            sway = 6 * math.sin(t * 1.2 + x)
+            for dx, dy, r in ((-90, 0.37, 110), (95, 0.36, 115), (0, 0.3, 150)):
+                ell(c, x + dx + sway, H * dy, r, r)
+                fs(c, "#2D6A4F" if dx else "#40916C", 4)
+        box(c, (W * 0.62, H * 0.6, 220, 30), (30, -18), "#B5651D", lw=3)
+        ln(c, [(W * 0.64, H * 0.6 + 30), (W * 0.64, H * 0.66)], 6)
+        ln(c, [(W * 0.62 + 200, H * 0.6 + 30), (W * 0.62 + 200, H * 0.66)], 6)
+    with Layer(c, pan, 1.5):
+        for x, r in ((-40, 180), (W + 40, 200)):
+            ell(c, x, H + 30, r, r * 0.8)
+            fs(c, "#2B9348", 4)
 
 
-def bg_night(c, W, H, t, g, rnd):
-    vgrad(c, 0, 0, W, g, "#0D1B2A", "#415A77")
-    for i in range(70):
-        x, y = rnd.random() * W, rnd.random() * g * 0.7
-        ellipse(c, x, y, 2.2, 2.2)
-        c.set_source_rgba(1, 1, 1, 0.4 + 0.6 * abs(math.sin(t + i)))
+def bg_space(c, W, H, t, rnd, pan):
+    vgrad(c, 0, 0, W, H, "#03071E", "#1B263B")
+    for depth, n, size in ((0.03, 90, 1.6), (0.1, 50, 2.4), (0.2, 25, 3.4)):
+        with Layer(c, pan, depth):
+            for i in range(n):
+                x, y = rnd.random() * (W + 400) - 200, rnd.random() * H * 0.75
+                ell(c, x, y, size, size)
+                c.set_source_rgba(1, 1, 1, 0.35 + 0.65 * abs(math.sin(t * (0.6 + rnd.random() * 2) + i)))
+                c.fill()
+    with Layer(c, pan, 0.06):
+        glow(c, W * 0.25, H * 0.25, 380, "#7209B7", 0.35)
+        glow(c, W * 0.7, H * 0.15, 320, "#4361EE", 0.3)
+    with Layer(c, pan, 0.18):
+        ell(c, W * 0.95, H * 0.3, 230, 230)
+        fs(c, "#F28482")
+        c.save()
+        ell(c, W * 0.95, H * 0.3, 230, 230)
+        c.clip()
+        for k in range(5):
+            ln(c, [(W * 0.6, H * 0.2 + k * 70), (W * 1.3, H * 0.24 + k * 70)], 26, (1, 1, 1, 0.12))
+        ell(c, W * 0.95 + 120, H * 0.3 + 60, 230, 230)
+        c.set_source_rgba(0, 0, 0, 0.3)
         c.fill()
-    ellipse(c, W * 0.8, H * 0.12, 70, 70)
-    fill_stroke(c, hx("#F8F3D4"))
-    ellipse(c, W * 0.8 + 30, H * 0.12 - 15, 60, 60)
-    c.set_source_rgba(*hx("#1B2C40"))
-    c.fill()
-    x = 0
-    while x < W:
-        bw = rnd.randint(160, 260)
-        bh = rnd.randint(160, 300)
-        c.rectangle(x, g - bh, bw, bh)
-        fill_stroke(c, hx("#1B263B"), 3)
-        c.move_to(x - 15, g - bh)
-        c.line_to(x + bw / 2, g - bh - 90)
-        c.line_to(x + bw + 15, g - bh)
+        c.restore()
+    with Layer(c, pan, 0.5):
+        c.move_to(-300, H * 0.62)
+        c.curve_to(W * 0.2, H * 0.57, W * 0.8, H * 0.58, W + 300, H * 0.63)
+        c.line_to(W + 300, H + 10)
+        c.line_to(-300, H + 10)
         c.close_path()
-        fill_stroke(c, hx("#0D1B2A"), 3)
-        c.rectangle(x + bw / 2 - 25, g - bh + 50, 50, 50)
-        c.set_source_rgba(*hx("#FFD166"))
-        c.fill()
-        x += bw + 30
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#2D4739"))
-    c.fill()
+        fs(c, "#ADB5BD", 4)
+        for cx_, cy_, r in ((0.15, 0.66, 60), (0.62, 0.64, 40), (0.88, 0.72, 80), (0.3, 0.86, 120), (0.78, 0.93, 90)):
+            ell(c, W * cx_, H * cy_, r, r * 0.32)
+            fs(c, "#868E96", 3)
+            ell(c, W * cx_, H * cy_ - r * 0.06, r * 0.8, r * 0.2)
+            fs(c, "#9AA1A9")
 
 
-def bg_volcano(c, W, H, t, g, rnd):
-    vgrad(c, 0, 0, W, g, "#FF7B54", "#FFD8A8")
-    vx = W * 0.62
-    for i in range(6):
-        k = (t * 0.25 + i / 6) % 1
-        ellipse(c, vx + 30 * math.sin(i + t), g - 700 - k * 600, 60 + k * 90, 50 + k * 70)
-        c.set_source_rgba(0.35, 0.33, 0.33, 0.7 * (1 - k))
-        c.fill()
-    c.move_to(vx - 500, g)
-    c.line_to(vx - 110, g - 680)
-    c.line_to(vx + 110, g - 680)
-    c.line_to(vx + 500, g)
-    c.close_path()
-    fill_stroke(c, hx("#6D4C41"), 6)
-    c.move_to(vx - 110, g - 680)
-    for k in range(6):
-        c.line_to(vx - 110 + k * 44, g - 680 + (60 + 30 * math.sin(t * 3 + k)) * (k % 2))
-    c.line_to(vx + 110, g - 680)
-    c.close_path()
-    fill_stroke(c, hx("#FF4800"), 4)
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#4E342E"))
-    c.fill()
-
-
-def bg_desert(c, W, H, t, g, rnd):
-    vgrad(c, 0, 0, W, g, "#FFB703", "#FFE8B5")
-    ellipse(c, W * 0.2, H * 0.12, 80, 80)
-    fill_stroke(c, hx("#FFF3C4"))
-    for px, ph, col in ((0.62, 520, "#E9A44C"), (0.9, 360, "#D98E3B"), (0.38, 300, "#D98E3B")):
-        c.move_to(W * px - ph, g)
-        c.line_to(W * px, g - ph)
-        c.line_to(W * px + ph, g)
+def bg_ocean(c, W, H, t, rnd, pan):
+    vgrad(c, 0, 0, W, H, "#4CC9F0", "#03256C")
+    with Layer(c, pan, 0.05):
+        for i in range(6):
+            x = W * (i * 0.2) + 40 * math.sin(t * 0.4 + i)
+            poly(c, [(x, 0), (x + 80, 0), (x + 260, H * 0.7), (x + 150, H * 0.7)], (1, 1, 1, 0.05))
+    with Layer(c, pan, 0.15):
+        for i in range(5):
+            ell(c, -100 + i * 300, H * 0.6, 200, 120)
+            setc(c, mix("#1E6091", "#4CC9F0", 0.4))
+            c.fill()
+    with Layer(c, pan, 0.3):
+        for i in range(6):
+            x = ((t * (60 + i * 15) + i * 300) % (W + 400)) - 200
+            y = H * (0.16 + 0.06 * i)
+            s = 0.6 + (i % 3) * 0.35
+            col = ("#FFB703", "#FB8500", "#F72585")[i % 3]
+            c.save()
+            c.translate(x, y + 10 * math.sin(t * 2 + i))
+            c.scale(s, s)
+            ell(c, 0, 0, 34, 18)
+            fs(c, col, 3)
+            poly(c, [(-30, 0), (-52, -16), (-52, 16)], col, 3)
+            ell(c, 16, -4, 4, 4)
+            fs(c, INK)
+            c.restore()
+    with Layer(c, pan, 0.5):
+        c.move_to(-300, H * 0.62)
+        c.curve_to(W * 0.3, H * 0.58, W * 0.7, H * 0.64, W + 300, H * 0.6)
+        c.line_to(W + 300, H + 10)
+        c.line_to(-300, H + 10)
         c.close_path()
-        fill_stroke(c, hx(col), 5)
-        c.move_to(W * px, g - ph)
-        c.line_to(W * px + ph, g)
-        c.line_to(W * px + ph * 0.25, g)
+        fs(c, "#E9D8A6", 4)
+        for j in range(5):
+            yy = H * (0.66 + 0.06 * j * (1 + j * 0.15))
+            ln(c, [(-300, yy), (W * 0.3, yy - 10), (W + 300, yy)], 3, "#D4B483")
+        for i in range(16):
+            bx = (i * 173) % W + 10 * math.sin(t * 2 + i)
+            by = H - ((t * (70 + i * 6) + i * 140) % H)
+            ell(c, bx, by, 8 + i % 4 * 3, 8 + i % 4 * 3)
+            c.set_source_rgba(1, 1, 1, 0.5)
+            c.set_line_width(3)
+            c.stroke()
+    with Layer(c, pan, 1.4):
+        for i, x0 in enumerate((-20, 60, W - 60, W + 10)):
+            pts = [(x0 + 30 * math.sin(t * 1.5 + k * 0.6 + i), H + 10 - k * 90) for k in range(9)]
+            ln(c, pts, 34, "#1B4332")
+            ln(c, pts, 22, "#2D6A4F")
+
+
+def bg_night(c, W, H, t, rnd, pan):
+    hz = H * 0.55
+    vgrad(c, 0, 0, W, hz, "#0B132B", "#3A506B")
+    with Layer(c, pan, 0.04):
+        for i in range(80):
+            x, y = rnd.random() * (W + 300) - 150, rnd.random() * hz * 0.75
+            ell(c, x, y, 2.2, 2.2)
+            c.set_source_rgba(1, 1, 1, 0.4 + 0.6 * abs(math.sin(t + i)))
+            c.fill()
+        glow(c, W * 0.78, H * 0.12, 200, "#F8F3D4", 0.35)
+        ell(c, W * 0.78, H * 0.12, 64, 64)
+        fs(c, "#F8F3D4")
+    with Layer(c, pan, 0.12):
+        x = -200
+        while x < W + 200:
+            bw, bh = rnd.randint(60, 110), rnd.randint(100, 280)
+            c.rectangle(x, hz - bh, bw, bh)
+            fs(c, "#1C2541")
+            for wy in range(int(hz - bh + 20), int(hz - 20), 34):
+                if rnd.random() < 0.35:
+                    c.rectangle(x + 15, wy, 14, 16)
+                    fs(c, "#FFD166")
+            x += bw + 6
+    with Layer(c, pan, 0.35):
+        poly(c, [(-300, hz), (W + 300, hz), (W + 300, H + 10), (-300, H + 10)], "#22333B")
+        for i, x in enumerate((W * 0.03, W * 0.64)):
+            box(c, (x, hz - 220, 300, 260), (40, -30), ("#5C677D", "#7D8597")[i], lw=3)
+            poly(c, [(x - 20, hz - 220), (x + 150, hz - 330), (x + 320, hz - 220)], "#33415C", 3)
+            for k in range(2):
+                glow(c, x + 75 + k * 140, hz - 135, 90, "#FFD166", 0.25)
+                rrect(c, x + 40 + k * 140, hz - 170, 70, 70, 4)
+                fs(c, "#FFD166", 3)
+        poly(c, [(W / 2 - 20, hz), (W / 2 + 20, hz), (W * 0.9, H + 10), (W * 0.1, H + 10)], "#495057")
+    with Layer(c, pan, 0.7):
+        x = W * 0.86
+        poly(c, [(x - 10, H * 0.42), (x + 10, H * 0.42), (x + 160, H * 0.8), (x - 160, H * 0.8)], (1, 0.9, 0.5, 0.12))
+        ln(c, [(x, H * 0.82), (x, H * 0.42)], 12, "#212529")
+        ell(c, x, H * 0.42, 22, 14)
+        fs(c, "#FFE066", 3)
+    with Layer(c, pan, 1.5):
+        for i in range(-1, 9):
+            rrect(c, i * 150, H * 0.88, 40, 260, 10)
+            fs(c, "#3E2723", 4)
+        ln(c, [(-100, H * 0.92), (W + 100, H * 0.92)], 18, "#4E342E")
+
+
+def bg_desert(c, W, H, t, rnd, pan):
+    hz = H * 0.52
+    with Layer(c, pan, 0.03):
+        vgrad(c, -200, 0, W + 400, hz, "#FF9E00", "#FFE8B5")
+        glow(c, W * 0.25, H * 0.13, 260, "#FFF3C4", 0.8)
+        ell(c, W * 0.25, H * 0.13, 80, 80)
+        fs(c, "#FFF3C4")
+    with Layer(c, pan, 0.1):
+        c.move_to(-300, hz)
+        c.curve_to(W * 0.2, hz - 90, W * 0.5, hz - 20, W + 300, hz - 70)
+        c.line_to(W + 300, hz + 40)
+        c.line_to(-300, hz + 40)
         c.close_path()
-        c.set_source_rgba(0, 0, 0, 0.12)
-        c.fill()
-    c.rectangle(0, g, W, H - g)
-    c.set_source_rgba(*hx("#F2CC8F"))
-    c.fill()
+        fs(c, "#F6D8AE")
+    with Layer(c, pan, 0.22):
+        for px, ph, col in ((0.72, 380, "#E9A44C"), (0.98, 260, "#DDA15E"), (0.42, 210, "#DDA15E")):
+            poly(c, [(W * px - ph, hz + 20), (W * px, hz + 20 - ph), (W * px + ph, hz + 20)], col, 4)
+            poly(c, [(W * px, hz + 20 - ph), (W * px + ph, hz + 20), (W * px + ph * 0.3, hz + 20)], (0, 0, 0, 0.13))
+    with Layer(c, pan, 0.5):
+        c.move_to(-300, hz + 30)
+        c.curve_to(W * 0.3, hz + 90, W * 0.6, hz - 10, W + 300, hz + 60)
+        c.line_to(W + 300, H + 10)
+        c.line_to(-300, H + 10)
+        c.close_path()
+        fs(c, "#F2CC8F", 4)
+        for j in range(5):
+            yy = H * (0.66 + 0.065 * j)
+            ln(c, [(-300, yy), (W * 0.5, yy - 25), (W + 300, yy + 5)], 3, "#E0B573")
+        x = W * 0.88
+        rrect(c, x - 25, H * 0.46, 50, 260, 25)
+        fs(c, "#52B788", 4)
+        rrect(c, x + 22, H * 0.52, 60, 26, 13)
+        fs(c, "#52B788", 4)
+        rrect(c, x + 58, H * 0.46, 26, 80, 13)
+        fs(c, "#52B788", 4)
+    with Layer(c, pan, 1.5):
+        ell(c, -20, H + 20, 260, 140)
+        fs(c, "#BC8A5F", 4)
+        ell(c, W + 40, H + 40, 220, 150)
+        fs(c, "#A47148", 4)
 
 
-ARKA_PLANLAR = {"room": bg_room, "park": bg_park, "city": bg_city, "space": bg_space, "ocean": bg_ocean,
-                "lab": bg_lab, "night": bg_night, "volcano": bg_volcano, "desert": bg_desert}
+def bg_volcano(c, W, H, t, rnd, pan):
+    hz = H * 0.56
+    with Layer(c, pan, 0.03):
+        vgrad(c, -200, 0, W + 400, hz, "#9D0208", "#FFBA08")
+    with Layer(c, pan, 0.1):
+        c.move_to(-300, hz)
+        for i in range(8):
+            c.line_to(-300 + i * 230 + 115, hz - 120 - (i * 41) % 90)
+            c.line_to(-300 + (i + 1) * 230, hz - 20)
+        c.line_to(W + 300, hz)
+        c.close_path()
+        fs(c, "#6A040F")
+    with Layer(c, pan, 0.25):
+        vx = W * 0.55
+        for i in range(7):
+            k = (t * 0.22 + i / 7) % 1
+            ell(c, vx + 40 * math.sin(i + t), hz - 600 - k * 600, 70 + k * 120, 55 + k * 90)
+            c.set_source_rgba(0.25, 0.22, 0.22, 0.75 * (1 - k))
+            c.fill()
+        poly(c, [(vx - 520, hz + 20), (vx - 110, hz - 620), (vx + 110, hz - 620), (vx + 520, hz + 20)], "#3C2A21", 5)
+        glow(c, vx, hz - 620, 260, "#FF4800", 0.6)
+        pts = [(vx - 110, hz - 620)]
+        for k in range(7):
+            pts.append((vx - 110 + k * 36, hz - 620 + (40 + 25 * math.sin(t * 3 + k)) * (k % 2)))
+        pts.append((vx + 110, hz - 620))
+        poly(c, pts, "#FF4800", 3)
+        ln(c, [(vx - 30, hz - 600), (vx - 80, hz - 400), (vx - 60, hz - 200)], 14, "#FF6D00")
+    with Layer(c, pan, 0.5):
+        poly(c, [(-300, hz + 10), (W + 300, hz + 10), (W + 300, H + 10), (-300, H + 10)], "#3E2723")
+        for i in range(6):
+            x = (i * 211) % W
+            a = 0.5 + 0.5 * abs(math.sin(t * 2 + i))
+            ln(c, [(x, H * 0.7 + i * 40), (x + 80, H * 0.72 + i * 40), (x + 140, H * 0.7 + i * 42)], 6, hx("#FF6D00", a))
+    with Layer(c, pan, 1.5):
+        ell(c, -10, H + 10, 240, 150)
+        fs(c, "#2B1D16", 4)
+        ell(c, W + 30, H + 30, 260, 170)
+        fs(c, "#2B1D16", 4)
+
+
+def bg_beach(c, W, H, t, rnd, pan):
+    hz = H * 0.46
+    with Layer(c, pan, 0.03):
+        vgrad(c, -200, 0, W + 400, hz, "#48CAE4", "#CAF0F8")
+        ell(c, W * 0.15, H * 0.1, 66, 66)
+        fs(c, "#FFE066")
+    with Layer(c, pan, 0.1):
+        vgrad(c, -300, hz, W + 600, H * 0.18, "#0096C7", "#48CAE4")
+        ell(c, W * 0.8, hz, 160, 40)
+        fs(c, "#52B788")
+        for j in range(5):
+            yy = hz + 30 + j * 30
+            off = 40 * math.sin(t * 1.5 + j)
+            ln(c, [(-200 + off, yy), (W * 0.3 + off, yy - 4), (W + 200 + off, yy)], 3, (1, 1, 1, 0.5))
+    with Layer(c, pan, 0.5):
+        wave = 14 * math.sin(t * 1.4)
+        c.move_to(-300, H * 0.62 + wave)
+        c.curve_to(W * 0.3, H * 0.6 + wave, W * 0.7, H * 0.64 + wave, W + 300, H * 0.61 + wave)
+        c.line_to(W + 300, H + 10)
+        c.line_to(-300, H + 10)
+        c.close_path()
+        fs(c, "#FFE8B5")
+        ln(c, [(-300, H * 0.62 + wave), (W * 0.5, H * 0.615 + wave), (W + 300, H * 0.61 + wave)], 10, (1, 1, 1, 0.8))
+        x = W * 0.84
+        ln(c, [(x, H * 0.75), (x - 20, H * 0.5)], 7)
+        c.move_to(x - 200, H * 0.53)
+        c.curve_to(x - 150, H * 0.43, x + 120, H * 0.43, x + 160, H * 0.5)
+        c.close_path()
+        fs(c, "#EF476F", 4)
+        poly(c, [(W * 0.06, H * 0.73), (W * 0.3, H * 0.73), (W * 0.34, H * 0.79), (W * 0.02, H * 0.79)], "#118AB2", 3)
+    with Layer(c, pan, 1.5):
+        for i in range(4):
+            c.save()
+            c.translate(W + 40, -40)
+            c.rotate(1.6 + i * 0.35 + 0.04 * math.sin(t * 1.2 + i))
+            c.move_to(0, 0)
+            c.curve_to(120, -60, 320, -40, 460, 0)
+            c.curve_to(320, 30, 120, 40, 0, 0)
+            fs(c, "#2D6A4F", 4)
+            c.restore()
+
+
+ARKA_PLANLAR = {"bedroom": bg_bedroom, "kitchen": bg_kitchen, "classroom": bg_classroom, "lab": bg_lab,
+                "street": bg_street, "park": bg_park, "space": bg_space, "ocean": bg_ocean,
+                "night": bg_night, "desert": bg_desert, "volcano": bg_volcano, "beach": bg_beach}
+ESKI_AD = {"room": "bedroom", "city": "street"}
 
 
 # ============================================================ nesneler
@@ -689,117 +1096,124 @@ def prop(c, kind, x, y, s, t):
     c.save()
     c.translate(x, y + 10 * math.sin(t * 1.8))
     c.scale(s, s)
+    glow(c, 0, 0, 120, "#FFFFFF", 0.22)
     if kind == "earth":
-        ellipse(c, 0, 0, 60, 60)
-        fill_stroke(c, hx("#4EA8DE"), 3)
+        ell(c, 0, 0, 60, 60)
+        fs(c, "#4EA8DE", 3)
         c.save()
-        ellipse(c, 0, 0, 60, 60)
+        ell(c, 0, 0, 60, 60)
         c.clip()
         off = (t * 20) % 240
         for k in (-240, 0):
             for dx, dy, rx, ry in ((-30, -15, 26, 18), (25, 10, 22, 30), (-5, 35, 18, 10), (60, -30, 20, 14)):
-                ellipse(c, dx + off + k, dy, rx, ry)
-                c.set_source_rgba(*hx("#52B788"))
-                c.fill()
+                ell(c, dx + off + k, dy, rx, ry)
+                fs(c, "#52B788")
+        ell(c, 25, 20, 60, 60)
+        c.set_source_rgba(0, 0, 0, 0.18)
+        c.fill()
         c.restore()
-        ellipse(c, 0, 0, 60, 60)
-        c.set_source_rgba(*INK, 1)
+        ell(c, 0, 0, 60, 60)
+        setc(c, INK)
         c.set_line_width(3)
         c.stroke()
     elif kind == "moon":
-        ellipse(c, 0, 0, 50, 50)
-        fill_stroke(c, hx("#E5E5E5"), 3)
+        ell(c, 0, 0, 50, 50)
+        fs(c, "#E5E5E5", 3)
         for dx, dy, r in ((-15, -10, 10), (18, 12, 8), (5, -25, 6)):
-            ellipse(c, dx, dy, r, r)
-            fill_stroke(c, hx("#C4C4C4"))
+            ell(c, dx, dy, r, r)
+            fs(c, "#C4C4C4")
+    elif kind == "sun":
+        for k in range(12):
+            a = k * math.pi / 6 + t * 0.4
+            ln(c, [(66 * math.cos(a), 66 * math.sin(a)), (86 * math.cos(a), 86 * math.sin(a))], 7, "#FFB703")
+        ell(c, 0, 0, 55, 55)
+        fs(c, "#FFD60A", 3)
     elif kind == "rocket":
         c.rotate(0.35)
         f = 1 + 0.25 * math.sin(t * 30)
-        c.move_to(-12, 40)
-        c.line_to(0, 40 + 34 * f)
-        c.line_to(12, 40)
-        fill_stroke(c, hx("#FF9F1C"), 2)
+        poly(c, [(-12, 40), (0, 40 + 34 * f), (12, 40)], "#FF9F1C", 2)
         rrect(c, -18, -40, 36, 82, 18)
-        fill_stroke(c, hx("#F1FAEE"), 3)
+        fs(c, "#F1FAEE", 3)
         c.move_to(-18, -20)
         c.curve_to(-18, -60, 18, -60, 18, -20)
-        fill_stroke(c, hx("#E63946"), 3)
-        ellipse(c, 0, 0, 9, 9)
-        fill_stroke(c, hx("#A8DADC"), 3)
+        fs(c, "#E63946", 3)
+        ell(c, 0, 0, 9, 9)
+        fs(c, "#A8DADC", 3)
     elif kind == "plane":
         c.translate(((t * 160) % 600) - 300, 0)
         rrect(c, -70, -12, 140, 24, 12)
-        fill_stroke(c, hx("#F8F9FA"), 3)
-        c.move_to(-10, 0)
-        c.line_to(20, 40)
-        c.line_to(35, 40)
-        c.line_to(20, 0)
-        fill_stroke(c, hx("#457B9D"), 3)
-        c.move_to(-60, -10)
-        c.line_to(-72, -36)
-        c.line_to(-58, -36)
-        c.line_to(-45, -10)
-        fill_stroke(c, hx("#457B9D"), 3)
+        fs(c, "#F8F9FA", 3)
+        poly(c, [(-10, 0), (20, 40), (35, 40), (20, 0)], "#457B9D", 3)
+        poly(c, [(-60, -10), (-72, -36), (-58, -36), (-45, -10)], "#457B9D", 3)
     elif kind == "clock":
-        ellipse(c, 0, 0, 55, 55)
-        fill_stroke(c, hx("#FFFFFF"), 5)
+        ell(c, 0, 0, 55, 55)
+        fs(c, "#FFFFFF", 5)
         for k in range(12):
             a = k * math.pi / 6
-            line(c, [(46 * math.sin(a), -46 * math.cos(a)), (40 * math.sin(a), -40 * math.cos(a))], 3)
-        a1, a2 = t * 6, t * 0.5
-        line(c, [(0, 0), (38 * math.sin(a1), -38 * math.cos(a1))], 4, hx("#E63946"))
-        line(c, [(0, 0), (26 * math.sin(a2), -26 * math.cos(a2))], 5)
+            ln(c, [(46 * math.sin(a), -46 * math.cos(a)), (40 * math.sin(a), -40 * math.cos(a))], 3)
+        ln(c, [(0, 0), (38 * math.sin(t * 6), -38 * math.cos(t * 6))], 4, "#E63946")
+        ln(c, [(0, 0), (26 * math.sin(t * 0.5), -26 * math.cos(t * 0.5))], 5)
     elif kind == "lightning":
         a = 0.6 + 0.4 * abs(math.sin(t * 12))
-        c.move_to(10, -70)
-        c.line_to(-25, 5)
-        c.line_to(2, 5)
-        c.line_to(-12, 70)
-        c.line_to(30, -15)
-        c.line_to(5, -15)
-        c.close_path()
-        fill_stroke(c, hx("#FFD60A", a), 3)
+        poly(c, [(10, -70), (-25, 5), (2, 5), (-12, 70), (30, -15), (5, -15)], hx("#FFD60A", a), 3)
     elif kind == "phone":
         c.rotate(0.15 * math.sin(t * 2))
         rrect(c, -32, -60, 64, 120, 12)
-        fill_stroke(c, hx("#22223B"), 3)
+        fs(c, "#22223B", 3)
         rrect(c, -26, -50, 52, 96, 6)
-        c.set_source_rgba(*hx("#8ECAE6"))
-        c.fill()
+        fs(c, "#8ECAE6")
         for k in range(3):
             rrect(c, -18, -40 + k * 28, 36, 18, 5)
-            c.set_source_rgba(1, 1, 1, 0.85)
-            c.fill()
+            fs(c, (1, 1, 1, 0.85))
     elif kind == "car":
         c.translate(((t * 120) % 500) - 250, 0)
         rrect(c, -80, -20, 160, 40, 14)
-        fill_stroke(c, hx("#E63946"), 3)
-        c.move_to(-45, -20)
-        c.line_to(-25, -50)
-        c.line_to(30, -50)
-        c.line_to(50, -20)
-        fill_stroke(c, hx("#A8DADC"), 3)
+        fs(c, "#E63946", 3)
+        poly(c, [(-45, -20), (-25, -50), (30, -50), (50, -20)], "#A8DADC", 3)
         for wx in (-48, 48):
-            ellipse(c, wx, 22, 18, 18)
-            fill_stroke(c, hx("#2B2D42"), 3)
+            ell(c, wx, 22, 18, 18)
+            fs(c, "#2B2D42", 3)
     elif kind == "atom":
         for k in range(3):
             c.save()
             c.rotate(k * math.pi / 3 + t * 0.6)
-            ellipse(c, 0, 0, 70, 24)
-            c.set_source_rgba(*hx("#4CC9F0"))
+            ell(c, 0, 0, 70, 24)
+            setc(c, "#4CC9F0")
             c.set_line_width(5)
             c.stroke()
             a = t * 3 + k * 2
-            ellipse(c, 70 * math.cos(a), 24 * math.sin(a), 7, 7)
-            fill_stroke(c, hx("#F72585"))
+            ell(c, 70 * math.cos(a), 24 * math.sin(a), 7, 7)
+            fs(c, "#F72585")
             c.restore()
-        ellipse(c, 0, 0, 16, 16)
-        fill_stroke(c, hx("#FFD60A"), 3)
+        ell(c, 0, 0, 16, 16)
+        fs(c, "#FFD60A", 3)
+    elif kind == "brain":
+        ell(c, 0, 0, 62, 48)
+        fs(c, "#FFAFCC", 3)
+        for k in range(4):
+            ln(c, [(-45 + k * 25, -30), (-35 + k * 25, -5), (-48 + k * 25, 20)], 3, "#E5989B")
+        ln(c, [(0, -46), (0, 46)], 3, "#E5989B")
+    elif kind == "money":
+        for k in range(3):
+            c.save()
+            c.translate(-30 + k * 30, -10 + 8 * math.sin(t * 3 + k))
+            c.rotate(-0.2 + k * 0.2)
+            rrect(c, -40, -22, 80, 44, 4)
+            fs(c, "#80B918", 3)
+            ell(c, 0, 0, 12, 12)
+            fs(c, "#55A630", 2)
+            c.restore()
+    elif kind == "heart":
+        c.scale(3, 3)
+        c.move_to(0, 12)
+        c.curve_to(-24, -6, -12, -27, 0, -12)
+        c.curve_to(12, -27, 24, -6, 0, 12)
+        fs(c, "#FF4D6D", 1.2)
     c.restore()
 
 
-NESNELER = ("earth", "moon", "rocket", "plane", "clock", "lightning", "phone", "car", "atom")
+NESNELER = ("earth", "moon", "sun", "rocket", "plane", "clock", "lightning", "phone", "car", "atom",
+            "brain", "money", "heart")
 
 
 def draw_bed(c, x, g, S, before=True, t=0):
@@ -807,219 +1221,223 @@ def draw_bed(c, x, g, S, before=True, t=0):
     c.translate(x, g)
     c.scale(S, S)
     if before:
-        rrect(c, -62, -34, 124, 22, 6)          # şilte
-        fill_stroke(c, hx("#FFFFFF"), 2.3)
-        rrect(c, -66, -34, 10, 34, 3)           # baş tahtası
-        fill_stroke(c, hx("#8D5B3B"), 2.3)
-        rrect(c, 56, -24, 8, 24, 3)
-        fill_stroke(c, hx("#8D5B3B"), 2.3)
-        rrect(c, -58, -46, 26, 14, 7)           # yastık
-        fill_stroke(c, hx("#E0E7FF"), 2.3)
+        box(c, (-64, -34, 128, 22), (0, -8), "#FFFFFF", lw=2)
+        rrect(c, -68, -46, 9, 46, 3)
+        fs(c, "#8D5B3B", 2)
+        rrect(c, 58, -26, 8, 26, 3)
+        fs(c, "#8D5B3B", 2)
+        rrect(c, -60, -50, 26, 14, 7)
+        fs(c, "#E0E7FF", 2)
     else:
-        b = 0.8 * math.sin(t * 1.4)              # nefes
-        c.move_to(-16, -58 - b)
-        c.curve_to(10, -66 - b, 50, -64 - b, 66, -50)
+        b = 0.8 * math.sin(t * 1.4)
+        c.move_to(-14, -56 - b)
+        c.curve_to(10, -64 - b, 50, -62 - b, 66, -48)
         c.line_to(66, -14)
-        c.line_to(-16, -14)
+        c.line_to(-14, -14)
         c.close_path()
-        fill_stroke(c, hx("#FF6B6B"), 2.3)
+        fs(c, "#4361EE", 2)
         for k in range(3):
-            line(c, [(0 + k * 22, -60 - b), (0 + k * 22, -16)], 1.4, hx("#E05555"))
-        draw_effect(c, "zzz", 1, -60, t)       # baş üstünde Z'ler
+            ln(c, [(2 + k * 22, -58 - b), (2 + k * 22, -16)], 1.2, "#3A0CA3")
+        draw_effect(c, "zzz", 1, -58, t)
     c.restore()
 
 
-# ============================================================ ses → ağız
-def mouth_track(audio_path, n_frames):
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(audio_path), "-ac", "1", "-ar", "16000",
-                          "-f", "s16le", "-"], capture_output=True, check=True).stdout
-    a = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768
-    hop = 16000 // FPS
-    vals = []
-    for i in range(n_frames):
-        seg = a[i * hop:(i + 1) * hop]
-        vals.append(float(np.sqrt(np.mean(seg ** 2))) if len(seg) else 0.0)
-    v = np.array(vals)
-    if v.max() > 0:
-        v = v / (np.percentile(v[v > 0], 90) + 1e-6)
-    out, prev = [], 0.0
-    for x in v:
-        x = min(1.0, max(0.0, (x - 0.12) / 0.75))
-        x = 0.6 * x + 0.4 * prev
-        prev = x
-        out.append(0.0 if x < 0.1 else 0.35 if x < 0.4 else 0.7 if x < 0.75 else 1.0)
-    return out
-
-
 # ============================================================ sahne zaman çizelgesi
-VARSAYILAN_POZ = {"neutral": "explain", "happy": "explain", "excited": "cheer", "shocked": "hands_up",
-                  "worried": "facepalm", "thinking": "think", "sad": "idle", "angry": "hips", "smug": "hips"}
-HAREKET_POZ = {"run": "idle", "sleep": "idle", "fly_away": "hands_up", "spin": "hands_up",
-               "look_up": "idle", "shiver": "facepalm", "wave": "wave", "point": "point", "shrug": "shrug", "hands_up": "hands_up", "think": "think",
-               "hips": "hips", "cheer": "cheer", "facepalm": "facepalm", "explain": "explain"}
-EFEKT = {"shocked": "!", "thinking": "?", "worried": "sweat", "excited": "sparkle"}
+VARSAYILAN_POZ = {"neutral": "idle", "happy": "explain", "excited": "cheer", "shocked": "hands_up",
+                  "worried": "facepalm", "thinking": "think", "sad": "idle", "angry": "hips", "smug": "hips",
+                  "scared": "hands_up", "sleepy": "idle"}
+HAREKET_POZ = {"run": "idle", "sleep": "idle", "fly_away": "hands_up", "spin": "hands_up", "look_up": "idle",
+               "shiver": "facepalm", "wave": "wave", "point": "point", "shrug": "shrug", "hands_up": "hands_up",
+               "think": "think", "hips": "hips", "cheer": "cheer", "facepalm": "facepalm", "explain": "explain",
+               "hug": "hug", "love": "hug"}
+EFEKT = {"shocked": "!", "thinking": "?", "worried": "sweat", "excited": "sparkle", "scared": "sweat"}
+HAREKETLER = ("idle", "walk_in", "walk", "run", "jump", "float", "spin", "fly_away", "sleep", "look_up", "shiver",
+              "shake", "wave", "point", "shrug", "hands_up", "think", "hips", "cheer", "facepalm", "explain", "hug",
+              "love")
+
+
+def normalize_scene(sc):
+    sc["arka_plan"] = ESKI_AD.get(sc.get("arka_plan"), sc.get("arka_plan"))
+    if sc["arka_plan"] not in ARKA_PLANLAR:
+        sc["arka_plan"] = "bedroom"
+    if sc.get("nesne") not in NESNELER:
+        sc["nesne"] = None
+    if sc.get("kamera") not in ("push_in", "punch", "static", "pan"):
+        sc["kamera"] = "push_in"
+    chars = sc.get("karakterler")
+    if not isinstance(chars, list) or not chars:
+        chars = [{"tip": "hero", "ifade": sc.get("ifade", "neutral"), "hareket": sc.get("hareket", "idle")}]
+        ik = sc.get("ikinci")
+        if isinstance(ik, dict):
+            chars.append({"tip": ik.get("tip"), "ifade": ik.get("ifade", "happy"), "hareket": "idle"})
+    out, seen = [], set()
+    for ch in chars[:3]:
+        if not isinstance(ch, dict):
+            continue
+        tip = ch.get("tip") if ch.get("tip") in KARAKTERLER else "hero"
+        if tip in seen:
+            continue
+        seen.add(tip)
+        out.append({"tip": tip, "ifade": ch.get("ifade") if ch.get("ifade") in IFADELER else "neutral",
+                    "hareket": ch.get("hareket") if ch.get("hareket") in HAREKETLER else "idle"})
+    sc["karakterler"] = out or [{"tip": "hero", "ifade": "neutral", "hareket": "idle"}]
+    return sc
+
+
+SLOTS = {1: [(0.5, 0.0)], 2: [(0.3, 0.0), (0.72, 0.1)], 3: [(0.27, 0.0), (0.75, 0.06), (0.52, 0.6)]}
+
+
+def char_state(ch, slot, n_chars, W, H, S, t, gt, blinks, nesne, i_char):
+    tip, expr, act = ch["tip"], ch["ifade"], ch["hareket"]
+    fx, z = slot
+    g = lerp(H * 0.775, H * 0.655, z)
+    s = S * lerp(1.0, 0.62, z)
+    x0 = W * fx
+    facing = 1 if (n_chars == 1 or fx < 0.5) else -1
+    x, leg, bob, lean, jump, spin, swing = x0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    eyes_force, fx_list, under = None, [], None
+    if act == "walk_in":
+        k = ease(t / 1.2)
+        start = -W * 0.2 if fx <= 0.5 else W * 1.2
+        x = lerp(start, x0, k)
+        if t < 1.2:
+            leg, bob, swing = 28 * math.sin(t * 13), -1.2 * abs(math.sin(t * 13)), 18 * math.sin(t * 13)
+            fx_list.append(("speed", 1))
+            facing = 1 if start < x0 else -1
+    elif act == "walk":
+        leg, bob, swing = 26 * math.sin(t * 11), -1.2 * abs(math.sin(t * 11)), 16 * math.sin(t * 11)
+        x = x0 + 40 * math.sin(t * 0.8)
+        facing = 1 if math.cos(t * 0.8) >= 0 else -1
+    elif act == "run":
+        leg, bob, swing, lean = 38 * math.sin(t * 20), -2.0 * abs(math.sin(t * 20)), 35 * math.sin(t * 20), 9
+        x = x0 + 20 * math.sin(t * 2)
+        fx_list.append(("speed", 1))
+    elif act == "jump":
+        ph = (t % 1.1) / 1.1
+        jump = -22 * s * math.sin(math.pi * ph / 0.45) if ph < 0.45 else 0
+        leg = 12 if ph < 0.45 else 0
+    elif act == "float":
+        jump = -10 * s * (1 + math.sin(t * 1.6))
+        lean = 8 * math.sin(t * 1.1)
+    elif act == "spin":
+        spin = (t * 300) % 360
+        jump = -6 * s * (1 + math.sin(t * 2))
+    elif act == "fly_away":
+        if t < 0.9:
+            x = x0 - 10 * ease(t / 0.9) + 4 * math.sin(t * 50)
+            lean = -12 * ease(t / 0.9)
+        k = max(0.0, t - 0.9)
+        x += (k ** 1.5) * W * 0.55
+        jump = -k * 25 * s
+        spin = k * 260
+        if k > 0:
+            fx_list.append(("speed", 1))
+    elif act == "sleep":
+        eyes_force, lean, jump, x, bob = 0.04, -90, -46 * s, x0 + 40 * s, 0
+        under = "bed"
+    elif act in ("shiver", "shake"):
+        x += (3 if act == "shiver" else 8) * math.sin(t * 60)
+        if act == "shiver":
+            fx_list.append(("sweat", 1))
+    elif act == "love":
+        fx_list.append(("heart", 1))
+    if act != "sleep":
+        bob += 0.6 * math.sin(gt * 2.4 + i_char)
+    pose = HAREKET_POZ.get(act, VARSAYILAN_POZ.get(expr, "idle"))
+    k = ease(t / 0.3)
+    (l0, r0), (l1, r1) = POZLAR["idle"], POZLAR[pose]
+    wig = 6 * math.sin(gt * 2.3 + i_char) if pose == "explain" else 0
+    wav = 25 * math.sin(gt * 10) if pose == "wave" else 0
+    arms = ((lerp(l0[0], l1[0], k) + wig * 0.5 + swing, lerp(l0[1], l1[1], k)),
+            (lerp(r0[0], r1[0], k) - wig - swing, lerp(r0[1], r1[1], k) + wav))
+    blink = 1.0
+    for b in blinks:
+        d = t - b - i_char * 0.7
+        if 0 <= d < 0.14:
+            blink = abs(d - 0.07) / 0.07
+    if eyes_force is not None:
+        blink = eyes_force
+    if act == "look_up":
+        look = (0.2 * math.sin(gt), -1.0)
+    elif n_chars > 1:
+        look = (0.8, 0.0)
+    else:
+        look = (0.3 * math.sin(gt * 0.7), -0.7 if nesne else 0.1)
+    effects = ([(EFEKT[expr], t)] if expr in EFEKT and act != "sleep" else []) + fx_list
+    return dict(tip=tip, z=z, g=g, under=under, x0=x0, st=dict(
+        x=x, y=g + jump, s=s, facing=facing, expr=expr, arms=arms, eyes_open=blink, look=look, leg=leg,
+        bob=bob, lean=lean, spin=spin, effects=effects, t=gt))
+
+
+def vignette(c, W, H):
+    g = cairo.RadialGradient(W / 2, H * 0.45, min(W, H) * 0.45, W / 2, H * 0.45, max(W, H) * 0.8)
+    g.add_color_stop_rgba(0, 0, 0, 0, 0)
+    g.add_color_stop_rgba(1, 0, 0, 0, 0.35)
+    c.rectangle(0, 0, W, H)
+    c.set_source(g)
+    c.fill()
 
 
 def scene_frames(sc, W, H, idx):
-    """Bir sahnenin karelerini üretir (cairo ImageSurface verisi)."""
+    sc = normalize_scene(sc)
     n = max(1, int(round(sc["sure"] * FPS)))
-    rnd_seed = 1000 + idx * 17
-    mouth = [0.0] * n            # anlatıcı ekran dışında: karakter konuşmaz, sahneyi yaşar
-    expr = sc.get("ifade", "neutral") if sc.get("ifade") in IFADELER else "neutral"
-    act = sc.get("hareket", "idle")
-    bg = ARKA_PLANLAR.get(sc.get("arka_plan"), bg_room)
-    nesne = sc.get("nesne") if sc.get("nesne") in NESNELER else None
-    ikinci = sc.get("ikinci") if isinstance(sc.get("ikinci"), dict) else None
-    if ikinci and ikinci.get("tip") not in KARAKTERLER:
-        ikinci = None
-    kamera = sc.get("kamera", "push_in")
-    g = H * 0.72
-    tall = H > W
-    S = (W * 0.0068 if tall else H * 0.0062) * (0.82 if ikinci else 1.0)
-    pose_name = HAREKET_POZ.get(act, VARSAYILAN_POZ.get(expr, "explain"))
-    blink_rng = random.Random(rnd_seed + 5)
-    blinks, tt = [], blink_rng.uniform(0.6, 2.0)
-    while tt < sc["sure"] + 1:
+    seed = 1000 + idx * 17
+    bg = ARKA_PLANLAR[sc["arka_plan"]]
+    nesne, kamera, chars = sc["nesne"], sc["kamera"], sc["karakterler"]
+    S = W * 0.0062
+    br = random.Random(seed + 5)
+    blinks, tt = [], br.uniform(0.6, 2.0)
+    while tt < sc["sure"] + 2:
         blinks.append(tt)
-        tt += blink_rng.uniform(1.8, 4.2)
-
+        tt += br.uniform(1.8, 4.2)
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
     c = cairo.Context(surf)
-    hero_x_target = W * (0.32 if ikinci else 0.5)
+    pan_dir = 1 if idx % 2 == 0 else -1
     for f in range(n):
         t = f / FPS
         gt = sc.get("t0", 0) + t
         c.save()
-        # kamera
         if kamera == "punch":
-            z = 1.0 + 0.18 * ease(t / 0.18) - 0.06 * ease((t - 0.18) / 0.5)
+            z = 1.0 + 0.16 * ease(t / 0.18) - 0.05 * ease((t - 0.18) / 0.5)
         elif kamera == "static":
             z = 1.0
         else:
             z = 1.0 + 0.07 * (t / max(sc["sure"], 0.1))
-        fy = g - 380 * S / 7
+        pan = pan_dir * (70 * (t / max(sc["sure"], 0.1)) - 35) if kamera in ("push_in", "pan") else 0
+        fy = H * 0.6
         c.translate(W / 2, fy)
         c.scale(z, z)
         c.translate(-W / 2, -fy)
-        if act == "shake" or (expr == "shocked" and t < 0.45):
-            c.translate(8 * math.sin(t * 70), 4 * math.cos(t * 55))
-        if act == "run":
-            off = (t * W * 0.6) % W
-            for k2 in (0, 1):
-                c.save()
-                c.translate(-off + k2 * W, 0)
-                bg(c, W, H, gt, g, random.Random(rnd_seed))
-                c.restore()
-        else:
-            bg(c, W, H, gt, g, random.Random(rnd_seed))
+        if any(ch["hareket"] == "shake" for ch in chars) or (chars[0]["ifade"] in ("shocked", "scared") and t < 0.4):
+            c.translate(7 * math.sin(t * 70), 4 * math.cos(t * 55))
+        if chars[0]["hareket"] == "run":       # koşu: hızlı paralaks kaydırma (dikiş yok)
+            pan = -180 + 360 * (t / max(sc["sure"], 0.1))
+        bg(c, W, H, gt, random.Random(seed), pan)
         if nesne:
-            px = W * (0.5 if not ikinci else 0.5)
-            py = H * 0.2 if tall else H * 0.28
-            prop(c, nesne, px, py, (W if tall else H) / 560, gt)
-
-        # kahraman durumu
-        x, leg, bob, lean, jump, spin = hero_x_target, 0.0, 0.0, 0.0, 0.0, 0.0
-        eyes_force, swing = None, 0.0
-        extra_fx = []
-        if act == "walk_in":
-            k = ease(t / 1.2)
-            x = lerp(-W * 0.25, hero_x_target, k)
-            if t < 1.2:
-                leg = 28 * math.sin(t * 13)
-                bob = -1.2 * abs(math.sin(t * 13))
-                swing = 18 * math.sin(t * 13)
-        elif act == "walk":
-            leg = 26 * math.sin(t * 11)
-            bob = -1.2 * abs(math.sin(t * 11))
-            swing = 16 * math.sin(t * 11)
-            x = hero_x_target + 40 * math.sin(t * 0.8)
-        elif act == "run":
-            x = hero_x_target
-            leg = 38 * math.sin(t * 20)
-            bob = -2.0 * abs(math.sin(t * 20))
-            swing = 35 * math.sin(t * 20)
-            lean = 9
-            extra_fx.append(("speed", 1))
-        elif act == "jump":
-            ph = (t % 1.1) / 1.1
-            jump = -60 * S / 7 * math.sin(math.pi * min(1, ph / 0.45)) if ph < 0.45 else 0
-            leg = 12 if ph < 0.45 else 0
-        elif act == "float":
-            jump = -40 * S / 7 * (1 + math.sin(t * 1.6))
-            lean = 8 * math.sin(t * 1.1)
-        elif act == "spin":
-            spin = (t * 300) % 360
-            jump = -25 * S / 7 * (1 + math.sin(t * 2))
-        elif act == "fly_away":
-            if t < 0.9:                       # önce direnir
-                x = hero_x_target - 10 * ease(t / 0.9) + 4 * math.sin(t * 50)
-                lean = -12 * ease(t / 0.9)
-            k = max(0.0, t - 0.9)
-            x += (k ** 1.5) * W * 0.55
-            jump = -k * 160 * S / 7
-            spin = k * 260
-            if k > 0:
-                extra_fx.append(("speed", 1))
-        elif act == "sleep":
-            eyes_force = 0.04
-            lean = -90
-            jump = -46 * S
-            x = hero_x_target + 40 * S
-            bob = 0
-        elif act == "shiver":
-            x += 3 * math.sin(t * 60)
-            extra_fx.append(("sweat", 1))
-        bob += 0.6 * math.sin(gt * 2.4)
-        # poz: başta nötrden hedef poza geçiş
-        k = ease(t / 0.3)
-        (l0, r0), (l1, r1) = POZLAR["idle"], POZLAR[pose_name]
-        wig = 6 * math.sin(gt * 2.3) if pose_name in ("explain",) else 0
-        wav = 25 * math.sin(gt * 10) if pose_name == "wave" else 0
-        arms = ((lerp(l0[0], l1[0], k) + wig * 0.5 + swing, lerp(l0[1], l1[1], k)),
-                (lerp(r0[0], r1[0], k) - wig - swing, lerp(r0[1], r1[1], k) + wav))
-        blink = 1.0
-        for b in blinks:
-            d = t - b
-            if 0 <= d < 0.14:
-                blink = abs(d - 0.07) / 0.07
-        if eyes_force is not None:
-            blink = eyes_force
-        if act == "look_up":
-            look = (0.2 * math.sin(gt), -1.0)
-        else:
-            look = (0.6 if ikinci else 0.25 * math.sin(gt * 0.7), -0.6 if nesne else 0.1)
-        effects = [(EFEKT[expr], t)] if expr in EFEKT and act != "sleep" else []
-        effects += extra_fx
-        if act == "walk_in" and t < 1.2:
-            effects.append(("speed", 1))
-        if act == "sleep":
-            draw_bed(c, hero_x_target, g, S, before=True)
-        draw_character(c, "hero", dict(x=x, y=g + jump, s=S, facing=1, expr=expr, arms=arms,
-                                       mouth=mouth[f], eyes_open=blink, look=look, leg=leg, bob=bob,
-                                       lean=lean, spin=spin, effects=effects, t=gt))
-        if act == "sleep":
-            draw_bed(c, hero_x_target, g, S, before=False, t=gt)
-        if ikinci:
-            e2 = ikinci.get("ifade", "happy") if ikinci.get("ifade") in IFADELER else "happy"
-            p2 = POZLAR[VARSAYILAN_POZ.get(e2, "idle")]
-            b2 = 1.0
-            for b in blinks:
-                d = t - b - 0.9
-                if 0 <= d < 0.14:
-                    b2 = abs(d - 0.07) / 0.07
-            draw_character(c, ikinci["tip"], dict(
-                x=W * 0.72, y=g, s=S, facing=-1, expr=e2, arms=p2, mouth=0.0, eyes_open=b2,
-                look=(0.6, 0), leg=0, bob=0.6 * math.sin(gt * 2.2 + 1), effects=[(EFEKT[e2], t)] if e2 in EFEKT else [],
-                t=gt))
+            with Layer(c, pan, 0.6):
+                prop(c, nesne, W * 0.5, H * 0.26, W / 600, gt)
+        states = [char_state(ch, SLOTS[len(chars)][i], len(chars), W, H, S, t, gt, blinks, nesne, i)
+                  for i, ch in enumerate(chars)]
+        for stt in sorted(states, key=lambda s_: -s_["z"]):
+            with Layer(c, pan, 1.0 - 0.4 * stt["z"]):
+                st = stt["st"]
+                if stt["under"] == "bed":
+                    draw_bed(c, stt["x0"], stt["g"], st["s"], True, gt)
+                else:
+                    lift = min(1.0, abs(st["y"] - stt["g"]) / (30 * st["s"]))
+                    shadow(c, st["x"], stt["g"] + 2, 15 * st["s"] * KARAKTERLER[stt["tip"]]["scale"] * (1 - 0.4 * lift),
+                           3.2 * st["s"], 0.25 * (1 - 0.6 * lift))
+                draw_character(c, stt["tip"], st)
+                if stt["under"] == "bed":
+                    draw_bed(c, stt["x0"], stt["g"], st["s"], False, gt)
         c.restore()
+        vignette(c, W, H)
         surf.flush()
         yield bytes(surf.get_data())
 
 
 def render(sahneler, cikti, ass=None, W=1080, H=1920, muzik=None):
-    import tempfile, os
     tmp = tempfile.mkdtemp()
-    # sesleri birleştir (sahne süresine göre doldurulmuş)
     parcalar = []
     for i, sc in enumerate(sahneler):
         p = os.path.join(tmp, f"a{i}.wav")

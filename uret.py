@@ -76,44 +76,47 @@ def konu_sec():
 
 
 # ---------------------------------------------------------------- 2) senaryo
-SENARYO_ISTEMI = """You are the head writer of a viral 2D-animated YouTube channel in the style of "The If Lab"
-and Zack D. Films: punchy curiosity stories (what-if scenarios, how things work, bizarre-but-true history,
+SENARYO_ISTEMI = """You are the head writer of a viral 2D-animated YouTube Shorts channel in the style of
+"The If Lab": punchy curiosity stories (what-if scenarios, how things work, bizarre-but-true history,
 the human body). Write ONE vertical Short about this topic: "{konu}".
 
-The video is a 2D cartoon told by an OFF-SCREEN NARRATOR (documentary-style voice-over).
-The on-screen star is CURIO: a character with a round yellow light-bulb head and a blue hoodie.
-Curio never speaks; he LIVES the story and represents "you" (the viewer). The narrator talks to
-the viewer in second person ("You wake up and...") or tells what happens to Curio, and every
-scene shows Curio physically acting out exactly what the narration describes.
-Optional side characters: "friend" (pink-headed buddy), "scientist" (glasses, lab coat), "kid" (red cap).
+The video is told by an OFF-SCREEN NARRATOR (voice-over). On screen, simple cartoon characters with
+black round heads and big white eyes LIVE the story. Characters never speak; their faces and actions
+show exactly what the narration says. The narrator talks to the viewer in second person
+("You wake up and...") and "hero" represents YOU in every scene.
+
+Cast (use "tip" names): hero (you, orange jacket), mom, dad, friend, scientist, kid, grandpa, girl,
+astronaut. Use side characters often to make it a real story (family reacting, a scientist explaining,
+a friend panicking). 1-3 characters per scene; hero is in most scenes.
 
 Rules:
-- Narration language: {dil}. Natural, spoken, energetic, funny. Total 100-140 words (~45-55 seconds).
-- Scene 1 is the HOOK: a shocking question or statement the viewer cannot scroll past (max 12 words).
-- A mini story with tension, a surprising fact and a twist. Every claim must be factually accurate.
+- Narration language: {dil}. Natural, spoken, energetic, funny. Total 110-150 words (~50-60 seconds).
+- Scene 1 is the HOOK: a shocking question or statement (max 12 words).
+- A mini story with escalation, surprising real facts and a twist ending. Every claim must be accurate.
 - No gore, no graphic injury, nothing distressing; family-safe.
-- The last scene's narration must flow seamlessly back into the first sentence so the Short loops.
-- {sahne_sayisi} scenes, 1-2 short sentences each. Change background, expression or action every scene.
+- The last line flows back into the first so the Short loops.
+- {sahne_sayisi} scenes, ONE short sentence each (fast cuts). Change location, characters or action
+  almost every scene; use at least 5 different locations.
 
 For every scene choose ONLY from these values:
-- "arka_plan": room | park | city | space | ocean | lab | night | volcano | desert
-- "ifade" (Curio's face): neutral | happy | excited | shocked | worried | thinking | sad | angry | smug
-- "hareket" (what Curio physically does in the scene): walk_in | walk | run | jump | float | spin |
-  fly_away (gets thrown off screen) | sleep | look_up | shiver | shake | wave | point | shrug |
-  hands_up | think | hips | cheer | facepalm | explain
-  Pick the action that SHOWS the narration (e.g. "you get flung east" -> fly_away, "you can't sleep" -> sleep,
-  "you sprint" -> run, "you stare at the sky" -> look_up). Vary actions; avoid "explain" unless nothing fits.
-- "nesne" (big animated object above Curio, or null): earth | moon | rocket | plane | clock |
-  lightning | phone | car | atom | null
-- "kamera": push_in | punch | static   (use "punch" for surprising moments)
-- "ikinci": null, or {{"tip": "friend|scientist|kid", "ifade": "<one ifade value>"}} (max 2 scenes)
+- "arka_plan": bedroom | kitchen | classroom | lab | street | park | space | ocean | night | desert |
+  volcano | beach
+- "karakterler": list of 1-3 objects {{"tip": cast name, "ifade": face, "hareket": action}}
+  - "ifade": neutral | happy | excited | shocked | worried | thinking | sad | angry | smug | scared | sleepy
+  - "hareket": walk_in | walk | run | jump | float | spin | fly_away | sleep | look_up | shiver | shake |
+    wave | point | shrug | hands_up | think | hips | cheer | facepalm | explain | hug | love | idle
+    Pick the action that SHOWS the narration ("you get flung east" -> fly_away, "you can't sleep" -> sleep,
+    "you sprint" -> run, "you stare at the sky" -> look_up, "mom panics" -> mom scared shake).
+- "nesne": big animated object in the sky/air, or null: earth | moon | sun | rocket | plane | clock |
+  lightning | phone | car | atom | brain | money | heart | null
+- "kamera": push_in | punch | static  ("punch" for shocking moments)
 
-Return ONLY JSON with this schema:
+Return ONLY JSON:
 {{"baslik": "catchy title in {dil}, max 70 chars, 1 emoji",
   "aciklama": "2-3 sentence description in {dil} + 3 hashtags",
   "etiketler": ["8-12 tags in {dil}"],
-  "sahneler": [{{"metin": "narration", "arka_plan": "...", "ifade": "...", "hareket": "...",
-                 "nesne": null, "kamera": "...", "ikinci": null}}]}}"""
+  "sahneler": [{{"metin": "narration", "arka_plan": "...", "nesne": null, "kamera": "...",
+                 "karakterler": [{{"tip": "hero", "ifade": "...", "hareket": "..."}}]}}]}}"""
 
 
 def llm_json(istem):
@@ -158,21 +161,13 @@ def llm_json(istem):
 
 def senaryo_yaz(konu):
     s = llm_json(SENARYO_ISTEMI.format(konu=konu, dil="Turkish" if DIL == "tr" else "English",
-                                       sahne_sayisi=random.choice([6, 7, 8])))
+                                       sahne_sayisi=random.choice([9, 10, 11, 12])))
     assert s.get("sahneler"), "Senaryo boş geldi"
     import animasyon as A
     for i, sh in enumerate(s["sahneler"]):
-        if sh.get("arka_plan") not in A.ARKA_PLANLAR:
-            sh["arka_plan"] = random.choice(list(A.ARKA_PLANLAR))
-        if sh.get("ifade") not in A.IFADELER:
-            sh["ifade"] = "neutral"
-        if sh.get("nesne") not in A.NESNELER:
-            sh["nesne"] = None
-        if sh.get("kamera") not in ("push_in", "punch", "static"):
-            sh["kamera"] = "punch" if i == 0 else "push_in"
-        ik = sh.get("ikinci")
-        if not (isinstance(ik, dict) and ik.get("tip") in A.KARAKTERLER and ik.get("tip") != "hero"):
-            sh["ikinci"] = None
+        A.normalize_scene(sh)
+        if i == 0 and sh["kamera"] == "push_in":
+            sh["kamera"] = "punch"
     s["konu"] = konu
     return s
 
