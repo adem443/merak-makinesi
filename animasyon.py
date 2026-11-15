@@ -140,6 +140,10 @@ def draw_character(c, kind, st):
     c.translate(st["x"], st["y"])
     c.scale(st["s"] * st["facing"], st["s"])
     c.rotate(math.radians(st.get("lean", 0)))
+    if st.get("spin"):
+        c.translate(0, -50)
+        c.rotate(math.radians(st["spin"]))
+        c.translate(0, 50)
     lw = 2.3
     bob = st.get("bob", 0)
 
@@ -363,6 +367,18 @@ def draw_effect(c, ef, k, hy, t):
                 c.line_to(r * 2 * math.cos(a + math.pi / 2), r * 2 * math.sin(a + math.pi / 2))
             c.close_path()
             fill_stroke(c, hx("#FFD60A"))
+            c.restore()
+    elif ef == "zzz":
+        c.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        for i in range(3):
+            k2 = (t * 0.5 + i / 3) % 1
+            c.save()
+            c.translate(22 + k2 * 18, hy - 22 - k2 * 40)
+            c.set_font_size(8 + k2 * 10)
+            c.move_to(0, 0)
+            c.text_path("Z")
+            c.set_source_rgba(*hx("#7C4DFF", 1 - k2))
+            c.fill()
             c.restore()
     elif ef == "speed":
         for i in range(3):
@@ -786,6 +802,33 @@ def prop(c, kind, x, y, s, t):
 NESNELER = ("earth", "moon", "rocket", "plane", "clock", "lightning", "phone", "car", "atom")
 
 
+def draw_bed(c, x, g, S, before=True, t=0):
+    c.save()
+    c.translate(x, g)
+    c.scale(S, S)
+    if before:
+        rrect(c, -62, -34, 124, 22, 6)          # şilte
+        fill_stroke(c, hx("#FFFFFF"), 2.3)
+        rrect(c, -66, -34, 10, 34, 3)           # baş tahtası
+        fill_stroke(c, hx("#8D5B3B"), 2.3)
+        rrect(c, 56, -24, 8, 24, 3)
+        fill_stroke(c, hx("#8D5B3B"), 2.3)
+        rrect(c, -58, -46, 26, 14, 7)           # yastık
+        fill_stroke(c, hx("#E0E7FF"), 2.3)
+    else:
+        b = 0.8 * math.sin(t * 1.4)              # nefes
+        c.move_to(-16, -58 - b)
+        c.curve_to(10, -66 - b, 50, -64 - b, 66, -50)
+        c.line_to(66, -14)
+        c.line_to(-16, -14)
+        c.close_path()
+        fill_stroke(c, hx("#FF6B6B"), 2.3)
+        for k in range(3):
+            line(c, [(0 + k * 22, -60 - b), (0 + k * 22, -16)], 1.4, hx("#E05555"))
+        draw_effect(c, "zzz", 1, -60, t)       # baş üstünde Z'ler
+    c.restore()
+
+
 # ============================================================ ses → ağız
 def mouth_track(audio_path, n_frames):
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(audio_path), "-ac", "1", "-ar", "16000",
@@ -811,7 +854,8 @@ def mouth_track(audio_path, n_frames):
 # ============================================================ sahne zaman çizelgesi
 VARSAYILAN_POZ = {"neutral": "explain", "happy": "explain", "excited": "cheer", "shocked": "hands_up",
                   "worried": "facepalm", "thinking": "think", "sad": "idle", "angry": "hips", "smug": "hips"}
-HAREKET_POZ = {"wave": "wave", "point": "point", "shrug": "shrug", "hands_up": "hands_up", "think": "think",
+HAREKET_POZ = {"run": "idle", "sleep": "idle", "fly_away": "hands_up", "spin": "hands_up",
+               "look_up": "idle", "shiver": "facepalm", "wave": "wave", "point": "point", "shrug": "shrug", "hands_up": "hands_up", "think": "think",
                "hips": "hips", "cheer": "cheer", "facepalm": "facepalm", "explain": "explain"}
 EFEKT = {"shocked": "!", "thinking": "?", "worried": "sweat", "excited": "sparkle"}
 
@@ -820,7 +864,7 @@ def scene_frames(sc, W, H, idx):
     """Bir sahnenin karelerini üretir (cairo ImageSurface verisi)."""
     n = max(1, int(round(sc["sure"] * FPS)))
     rnd_seed = 1000 + idx * 17
-    mouth = mouth_track(sc["ses_dosya"], n)
+    mouth = [0.0] * n            # anlatıcı ekran dışında: karakter konuşmaz, sahneyi yaşar
     expr = sc.get("ifade", "neutral") if sc.get("ifade") in IFADELER else "neutral"
     act = sc.get("hareket", "idle")
     bg = ARKA_PLANLAR.get(sc.get("arka_plan"), bg_room)
@@ -859,24 +903,43 @@ def scene_frames(sc, W, H, idx):
         c.translate(-W / 2, -fy)
         if act == "shake" or (expr == "shocked" and t < 0.45):
             c.translate(8 * math.sin(t * 70), 4 * math.cos(t * 55))
-        bg(c, W, H, gt, g, random.Random(rnd_seed))
+        if act == "run":
+            off = (t * W * 0.6) % W
+            for k2 in (0, 1):
+                c.save()
+                c.translate(-off + k2 * W, 0)
+                bg(c, W, H, gt, g, random.Random(rnd_seed))
+                c.restore()
+        else:
+            bg(c, W, H, gt, g, random.Random(rnd_seed))
         if nesne:
             px = W * (0.5 if not ikinci else 0.5)
             py = H * 0.2 if tall else H * 0.28
             prop(c, nesne, px, py, (W if tall else H) / 560, gt)
 
         # kahraman durumu
-        x, leg, bob, lean, jump = hero_x_target, 0.0, 0.0, 0.0, 0.0
+        x, leg, bob, lean, jump, spin = hero_x_target, 0.0, 0.0, 0.0, 0.0, 0.0
+        eyes_force, swing = None, 0.0
+        extra_fx = []
         if act == "walk_in":
             k = ease(t / 1.2)
             x = lerp(-W * 0.25, hero_x_target, k)
             if t < 1.2:
                 leg = 28 * math.sin(t * 13)
                 bob = -1.2 * abs(math.sin(t * 13))
+                swing = 18 * math.sin(t * 13)
         elif act == "walk":
             leg = 26 * math.sin(t * 11)
             bob = -1.2 * abs(math.sin(t * 11))
+            swing = 16 * math.sin(t * 11)
             x = hero_x_target + 40 * math.sin(t * 0.8)
+        elif act == "run":
+            x = hero_x_target
+            leg = 38 * math.sin(t * 20)
+            bob = -2.0 * abs(math.sin(t * 20))
+            swing = 35 * math.sin(t * 20)
+            lean = 9
+            extra_fx.append(("speed", 1))
         elif act == "jump":
             ph = (t % 1.1) / 1.1
             jump = -60 * S / 7 * math.sin(math.pi * min(1, ph / 0.45)) if ph < 0.45 else 0
@@ -884,27 +947,58 @@ def scene_frames(sc, W, H, idx):
         elif act == "float":
             jump = -40 * S / 7 * (1 + math.sin(t * 1.6))
             lean = 8 * math.sin(t * 1.1)
+        elif act == "spin":
+            spin = (t * 300) % 360
+            jump = -25 * S / 7 * (1 + math.sin(t * 2))
+        elif act == "fly_away":
+            if t < 0.9:                       # önce direnir
+                x = hero_x_target - 10 * ease(t / 0.9) + 4 * math.sin(t * 50)
+                lean = -12 * ease(t / 0.9)
+            k = max(0.0, t - 0.9)
+            x += (k ** 1.5) * W * 0.55
+            jump = -k * 160 * S / 7
+            spin = k * 260
+            if k > 0:
+                extra_fx.append(("speed", 1))
+        elif act == "sleep":
+            eyes_force = 0.04
+            lean = -90
+            jump = -46 * S
+            x = hero_x_target + 40 * S
+            bob = 0
+        elif act == "shiver":
+            x += 3 * math.sin(t * 60)
+            extra_fx.append(("sweat", 1))
         bob += 0.6 * math.sin(gt * 2.4)
-        talking = mouth[f] > 0
-        # poz: başta nötrden hedef poza geçiş + konuşurken hafif jest
+        # poz: başta nötrden hedef poza geçiş
         k = ease(t / 0.3)
         (l0, r0), (l1, r1) = POZLAR["idle"], POZLAR[pose_name]
-        wig = 8 * math.sin(gt * 3.1) if talking and pose_name in ("explain", "idle") else 0
+        wig = 6 * math.sin(gt * 2.3) if pose_name in ("explain",) else 0
         wav = 25 * math.sin(gt * 10) if pose_name == "wave" else 0
-        arms = ((lerp(l0[0], l1[0], k) + wig * 0.5, lerp(l0[1], l1[1], k)),
-                (lerp(r0[0], r1[0], k) - wig, lerp(r0[1], r1[1], k) + wav))
+        arms = ((lerp(l0[0], l1[0], k) + wig * 0.5 + swing, lerp(l0[1], l1[1], k)),
+                (lerp(r0[0], r1[0], k) - wig - swing, lerp(r0[1], r1[1], k) + wav))
         blink = 1.0
         for b in blinks:
             d = t - b
             if 0 <= d < 0.14:
                 blink = abs(d - 0.07) / 0.07
-        look = (0.6 if ikinci else 0.25 * math.sin(gt * 0.7), -0.3 if nesne else 0.1)
-        effects = [(EFEKT[expr], t)] if expr in EFEKT else []
-        if act in ("walk_in", "walk") and t < 1.2:
+        if eyes_force is not None:
+            blink = eyes_force
+        if act == "look_up":
+            look = (0.2 * math.sin(gt), -1.0)
+        else:
+            look = (0.6 if ikinci else 0.25 * math.sin(gt * 0.7), -0.6 if nesne else 0.1)
+        effects = [(EFEKT[expr], t)] if expr in EFEKT and act != "sleep" else []
+        effects += extra_fx
+        if act == "walk_in" and t < 1.2:
             effects.append(("speed", 1))
+        if act == "sleep":
+            draw_bed(c, hero_x_target, g, S, before=True)
         draw_character(c, "hero", dict(x=x, y=g + jump, s=S, facing=1, expr=expr, arms=arms,
                                        mouth=mouth[f], eyes_open=blink, look=look, leg=leg, bob=bob,
-                                       lean=lean, effects=effects, t=gt))
+                                       lean=lean, spin=spin, effects=effects, t=gt))
+        if act == "sleep":
+            draw_bed(c, hero_x_target, g, S, before=False, t=gt)
         if ikinci:
             e2 = ikinci.get("ifade", "happy") if ikinci.get("ifade") in IFADELER else "happy"
             p2 = POZLAR[VARSAYILAN_POZ.get(e2, "idle")]

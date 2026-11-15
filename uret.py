@@ -80,10 +80,12 @@ SENARYO_ISTEMI = """You are the head writer of a viral 2D-animated YouTube chann
 and Zack D. Films: punchy curiosity stories (what-if scenarios, how things work, bizarre-but-true history,
 the human body). Write ONE vertical Short about this topic: "{konu}".
 
-The video is a 2D cartoon. The star is CURIO, our mascot: a cheerful character with a round yellow
-light-bulb head and a blue hoodie. Curio is the narrator AND the actor: he talks to the viewer
-("you", "I") and acts out the story. Optional side characters: "friend" (pink-headed buddy),
-"scientist" (glasses, lab coat), "kid" (red cap).
+The video is a 2D cartoon told by an OFF-SCREEN NARRATOR (documentary-style voice-over).
+The on-screen star is CURIO: a character with a round yellow light-bulb head and a blue hoodie.
+Curio never speaks; he LIVES the story and represents "you" (the viewer). The narrator talks to
+the viewer in second person ("You wake up and...") or tells what happens to Curio, and every
+scene shows Curio physically acting out exactly what the narration describes.
+Optional side characters: "friend" (pink-headed buddy), "scientist" (glasses, lab coat), "kid" (red cap).
 
 Rules:
 - Narration language: {dil}. Natural, spoken, energetic, funny. Total 100-140 words (~45-55 seconds).
@@ -96,8 +98,11 @@ Rules:
 For every scene choose ONLY from these values:
 - "arka_plan": room | park | city | space | ocean | lab | night | volcano | desert
 - "ifade" (Curio's face): neutral | happy | excited | shocked | worried | thinking | sad | angry | smug
-- "hareket" (Curio's action): explain | wave | point | shrug | hands_up | think | hips | cheer |
-  facepalm | walk_in | walk | jump | float | shake
+- "hareket" (what Curio physically does in the scene): walk_in | walk | run | jump | float | spin |
+  fly_away (gets thrown off screen) | sleep | look_up | shiver | shake | wave | point | shrug |
+  hands_up | think | hips | cheer | facepalm | explain
+  Pick the action that SHOWS the narration (e.g. "you get flung east" -> fly_away, "you can't sleep" -> sleep,
+  "you sprint" -> run, "you stare at the sky" -> look_up). Vary actions; avoid "explain" unless nothing fits.
 - "nesne" (big animated object above Curio, or null): earth | moon | rocket | plane | clock |
   lightning | phone | car | atom | null
 - "kamera": push_in | punch | static   (use "punch" for surprising moments)
