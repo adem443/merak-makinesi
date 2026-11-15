@@ -439,7 +439,7 @@ def draw_effect(c, ef, k, hy, t):
     if k <= 0:
         return
     if ef == "!":
-        s = ease(k * 3) * (1 + 0.08 * math.sin(t * 18))
+        s = ease(k * 3)
         c.save()
         c.translate(25, hy - 25)
         c.scale(s, s)
@@ -451,7 +451,7 @@ def draw_effect(c, ef, k, hy, t):
         c.restore()
     elif ef == "?":
         c.save()
-        c.translate(26, hy - 22 + 2 * math.sin(t * 3))
+        c.translate(26, hy - 22)
         c.scale(ease(k * 3), ease(k * 3))
         c.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         c.set_font_size(19)
@@ -744,6 +744,8 @@ def bg_street(c, W, H, t, rnd, pan):
             c.fill()
             x += bw + 4
     with Layer(c, pan, 0.45):
+        c.rectangle(-300, vy - 2, W + 600, H - vy + 12)
+        fs(c, "#ADB5BD")
         poly(c, [(vx - 30, vy), (vx + 30, vy), (W + 300, H), (-300, H)], "#495057")
         poly(c, [(vx - 30, vy), (vx - 60, vy), (-800, H), (-300, H)], "#ADB5BD")
         poly(c, [(vx + 30, vy), (vx + 60, vy), (W + 800, H), (W + 300, H)], "#ADB5BD")
@@ -1094,7 +1096,7 @@ ESKI_AD = {"room": "bedroom", "city": "street"}
 # ============================================================ nesneler
 def prop(c, kind, x, y, s, t):
     c.save()
-    c.translate(x, y + 10 * math.sin(t * 1.8))
+    c.translate(x, y + 5 * math.sin(t * 1.0))
     c.scale(s, s)
     glow(c, 0, 0, 120, "#FFFFFF", 0.22)
     if kind == "earth":
@@ -1296,57 +1298,52 @@ def char_state(ch, slot, n_chars, W, H, S, t, gt, blinks, nesne, i_char):
     facing = 1 if (n_chars == 1 or fx < 0.5) else -1
     x, leg, bob, lean, jump, spin, swing = x0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     eyes_force, fx_list, under = None, [], None
-    if act == "walk_in":
-        k = ease(t / 1.2)
-        start = -W * 0.2 if fx <= 0.5 else W * 1.2
-        x = lerp(start, x0, k)
-        if t < 1.2:
-            leg, bob, swing = 28 * math.sin(t * 13), -1.2 * abs(math.sin(t * 13)), 18 * math.sin(t * 13)
-            fx_list.append(("speed", 1))
+    stride = 26 * s                        # bir adım döngüsünde alınan yol (px): ayak kaymasın
+    if act in ("walk_in", "walk"):
+        dur = 1.8
+        start = -W * 0.18 if fx <= 0.5 else W * 1.18
+        if t < dur:
+            x = lerp(start, x0, t / dur)          # sabit hız
+            v = abs(x0 - start) / dur
+            ph = 2 * math.pi * (x - start) / stride
+            leg, swing = 26 * math.sin(ph), 16 * math.sin(ph)
+            bob = -1.0 * abs(math.sin(ph))
             facing = 1 if start < x0 else -1
-    elif act == "walk":
-        leg, bob, swing = 26 * math.sin(t * 11), -1.2 * abs(math.sin(t * 11)), 16 * math.sin(t * 11)
-        x = x0 + 40 * math.sin(t * 0.8)
-        facing = 1 if math.cos(t * 0.8) >= 0 else -1
     elif act == "run":
-        leg, bob, swing, lean = 38 * math.sin(t * 20), -2.0 * abs(math.sin(t * 20)), 35 * math.sin(t * 20), 9
-        x = x0 + 20 * math.sin(t * 2)
+        ph = t * 14
+        leg, bob, swing, lean = 36 * math.sin(ph), -1.6 * abs(math.sin(ph)), 32 * math.sin(ph), 8
         fx_list.append(("speed", 1))
     elif act == "jump":
-        ph = (t % 1.1) / 1.1
-        jump = -22 * s * math.sin(math.pi * ph / 0.45) if ph < 0.45 else 0
-        leg = 12 if ph < 0.45 else 0
+        ph = (t % 1.3) / 1.3
+        jump = -18 * s * math.sin(math.pi * ph / 0.4) if ph < 0.4 else 0
+        leg = 10 if ph < 0.4 else 0
     elif act == "float":
-        jump = -10 * s * (1 + math.sin(t * 1.6))
-        lean = 8 * math.sin(t * 1.1)
+        jump = -8 * s * (1 + math.sin(t * 1.2))
+        lean = 5 * math.sin(t * 0.9)
     elif act == "spin":
-        spin = (t * 300) % 360
-        jump = -6 * s * (1 + math.sin(t * 2))
+        spin = (t * 240) % 360
+        jump = -10 * s
     elif act == "fly_away":
-        if t < 0.9:
-            x = x0 - 10 * ease(t / 0.9) + 4 * math.sin(t * 50)
-            lean = -12 * ease(t / 0.9)
-        k = max(0.0, t - 0.9)
-        x += (k ** 1.5) * W * 0.55
-        jump = -k * 25 * s
-        spin = k * 260
+        k = max(0.0, t - 0.6)
+        x = x0 + (k ** 1.6) * W * 0.5
+        jump = -k * 18 * s
+        spin = k * 200
+        lean = -10 * ease(t / 0.6)
         if k > 0:
             fx_list.append(("speed", 1))
     elif act == "sleep":
         eyes_force, lean, jump, x, bob = 0.04, -90, -46 * s, x0 + 40 * s, 0
         under = "bed"
-    elif act in ("shiver", "shake"):
-        x += (3 if act == "shiver" else 8) * math.sin(t * 60)
-        if act == "shiver":
-            fx_list.append(("sweat", 1))
+    elif act == "shiver":
+        fx_list.append(("sweat", 1))
     elif act == "love":
         fx_list.append(("heart", 1))
     if act != "sleep":
-        bob += 0.6 * math.sin(gt * 2.4 + i_char)
+        bob += 0.35 * math.sin(gt * 1.8 + i_char)
     pose = HAREKET_POZ.get(act, VARSAYILAN_POZ.get(expr, "idle"))
     k = ease(t / 0.3)
     (l0, r0), (l1, r1) = POZLAR["idle"], POZLAR[pose]
-    wig = 6 * math.sin(gt * 2.3 + i_char) if pose == "explain" else 0
+    wig = 4 * math.sin(gt * 1.6 + i_char) if pose == "explain" else 0
     wav = 25 * math.sin(gt * 10) if pose == "wave" else 0
     arms = ((lerp(l0[0], l1[0], k) + wig * 0.5 + swing, lerp(l0[1], l1[1], k)),
             (lerp(r0[0], r1[0], k) - wig - swing, lerp(r0[1], r1[1], k) + wav))
@@ -1384,7 +1381,7 @@ def scene_frames(sc, W, H, idx):
     seed = 1000 + idx * 17
     bg = ARKA_PLANLAR[sc["arka_plan"]]
     nesne, kamera, chars = sc["nesne"], sc["kamera"], sc["karakterler"]
-    S = W * 0.0062
+    S = W * 0.0042
     br = random.Random(seed + 5)
     blinks, tt = [], br.uniform(0.6, 2.0)
     while tt < sc["sure"] + 2:
@@ -1397,25 +1394,11 @@ def scene_frames(sc, W, H, idx):
         t = f / FPS
         gt = sc.get("t0", 0) + t
         c.save()
-        if kamera == "punch":
-            z = 1.0 + 0.16 * ease(t / 0.18) - 0.05 * ease((t - 0.18) / 0.5)
-        elif kamera == "static":
-            z = 1.0
-        else:
-            z = 1.0 + 0.07 * (t / max(sc["sure"], 0.1))
-        pan = pan_dir * (70 * (t / max(sc["sure"], 0.1)) - 35) if kamera in ("push_in", "pan") else 0
-        fy = H * 0.6
-        c.translate(W / 2, fy)
-        c.scale(z, z)
-        c.translate(-W / 2, -fy)
-        if any(ch["hareket"] == "shake" for ch in chars) or (chars[0]["ifade"] in ("shocked", "scared") and t < 0.4):
-            c.translate(7 * math.sin(t * 70), 4 * math.cos(t * 55))
-        if chars[0]["hareket"] == "run":       # koşu: hızlı paralaks kaydırma (dikiş yok)
-            pan = -180 + 360 * (t / max(sc["sure"], 0.1))
+        pan = 0                                   # sabit kamera: titreme, zoom, kayma yok
         bg(c, W, H, gt, random.Random(seed), pan)
         if nesne:
             with Layer(c, pan, 0.6):
-                prop(c, nesne, W * 0.5, H * 0.26, W / 600, gt)
+                prop(c, nesne, W * 0.5, H * 0.3, W / 820, gt)
         states = [char_state(ch, SLOTS[len(chars)][i], len(chars), W, H, S, t, gt, blinks, nesne, i)
                   for i, ch in enumerate(chars)]
         for stt in sorted(states, key=lambda s_: -s_["z"]):

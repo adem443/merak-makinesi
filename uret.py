@@ -103,19 +103,18 @@ For every scene choose ONLY from these values:
   volcano | beach
 - "karakterler": list of 1-3 objects {{"tip": cast name, "ifade": face, "hareket": action}}
   - "ifade": neutral | happy | excited | shocked | worried | thinking | sad | angry | smug | scared | sleepy
-  - "hareket": walk_in | walk | run | jump | float | spin | fly_away | sleep | look_up | shiver | shake |
+  - "hareket": walk_in | walk | run | jump | float | spin | fly_away | sleep | look_up | shiver |
     wave | point | shrug | hands_up | think | hips | cheer | facepalm | explain | hug | love | idle
     Pick the action that SHOWS the narration ("you get flung east" -> fly_away, "you can't sleep" -> sleep,
-    "you sprint" -> run, "you stare at the sky" -> look_up, "mom panics" -> mom scared shake).
+    "you sprint" -> run, "you stare at the sky" -> look_up, "mom panics" -> mom scared hands_up).
 - "nesne": big animated object in the sky/air, or null: earth | moon | sun | rocket | plane | clock |
   lightning | phone | car | atom | brain | money | heart | null
-- "kamera": push_in | punch | static  ("punch" for shocking moments)
 
 Return ONLY JSON:
 {{"baslik": "catchy title in {dil}, max 70 chars, 1 emoji",
   "aciklama": "2-3 sentence description in {dil} + 3 hashtags",
   "etiketler": ["8-12 tags in {dil}"],
-  "sahneler": [{{"metin": "narration", "arka_plan": "...", "nesne": null, "kamera": "...",
+  "sahneler": [{{"metin": "narration", "arka_plan": "...", "nesne": null,
                  "karakterler": [{{"tip": "hero", "ifade": "...", "hareket": "..."}}]}}]}}"""
 
 
@@ -298,7 +297,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Ana,DejaVu Sans,78,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,70,70,370,1
+Style: Ana,DejaVu Sans,78,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,70,70,980,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
