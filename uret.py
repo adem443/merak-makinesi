@@ -98,8 +98,15 @@ Rules:
 - {sahne_sayisi} scenes, ONE short sentence each (fast cuts). Change location, characters or action
   almost every scene; use at least 5 different locations.
 
+LOCATIONS: First invent the 4-6 specific places this story needs ("mekanlar"), described visually
+in English so an illustrator can draw them, e.g. "a hospital emergency room with beds and heart monitors",
+"inside a crowded airplane cabin at night", "an ancient Roman arena under a hot sun",
+"a snowy Arctic research station in a blizzard", "a busy Tokyo street at night with neon signs".
+Each place must match what the narration says happens there. Every scene uses one of them ("mekan" = index),
+and consecutive scenes may share a place. Use at least 4 different places.
+
 For every scene choose ONLY from these values:
-- "arka_plan": bedroom | kitchen | classroom | lab | street | park | space | ocean | night | desert |
+- "arka_plan" (backup drawing if the place image fails, pick the closest): bedroom | kitchen | classroom | lab | street | park | space | ocean | night | desert |
   volcano | beach
 - "karakterler": list of 1-3 objects {{"tip": cast name, "ifade": face, "hareket": action}}
   - "ifade": neutral | happy | excited | shocked | worried | thinking | sad | angry | smug | scared | sleepy
@@ -114,7 +121,8 @@ Return ONLY JSON:
 {{"baslik": "catchy title in {dil}, max 70 chars, 1 emoji",
   "aciklama": "2-3 sentence description in {dil} + 3 hashtags",
   "etiketler": ["8-12 tags in {dil}"],
-  "sahneler": [{{"metin": "narration", "arka_plan": "...", "nesne": null,
+  "mekanlar": ["visual description of place 0", "place 1", "..."],
+  "sahneler": [{{"metin": "narration", "mekan": 0, "arka_plan": "...", "nesne": null,
                  "karakterler": [{{"tip": "hero", "ifade": "...", "hareket": "..."}}]}}]}}"""
 
 
@@ -169,6 +177,97 @@ def senaryo_yaz(konu):
             sh["kamera"] = "punch"
     s["konu"] = konu
     return s
+
+
+# ---------------------------------------------------------------- 3) anlatıya özel arka planlar
+ARKA_PLAN_STILI = ("Flat 2D vector cartoon background illustration, clean bold dark outlines, flat soft colors, "
+                   "simple shapes, light shading, cheerful educational animated explainer style. Wide eye-level "
+                   "view of an empty scene, open floor space across the lower half, no people, no characters, "
+                   "no animals, no text, no letters, no logo, no watermark")
+_son_istek = [0.0]
+
+
+def _pollinations(istem, tohum, hedef):
+    """Ücretsiz sınır: IP başına 45 sn'de 1 görsel. Bekleyerek ve yeniden deneyerek uyar."""
+    q = urllib.parse.quote(istem)
+    for deneme in range(6):
+        bekle = 47 - (time.time() - _son_istek[0])
+        if bekle > 0 and not POLL_TOKEN:
+            time.sleep(bekle)
+        _son_istek[0] = time.time()
+        try:
+            if POLL_TOKEN:
+                url = f"https://gen.pollinations.ai/image/{q}?width={W}&height={H}&seed={tohum}&model=flux&nologo=true"
+                r = requests.get(url, headers={"Authorization": f"Bearer {POLL_TOKEN}"}, timeout=150)
+            else:
+                url = (f"https://image.pollinations.ai/prompt/{q}"
+                       f"?width={W}&height={H}&seed={tohum}&model=flux&nologo=true")
+                r = requests.get(url, timeout=150)
+            if r.ok and r.headers.get("content-type", "").startswith("image") and len(r.content) > 15000:
+                hedef.write_bytes(r.content)
+                return True
+            m = re.search(r"Retry after (\d+)s", r.text)
+            log(f"  Pollinations {r.status_code}, {m.group(1) if m else '?'} sn sonra tekrar")
+            if m:
+                time.sleep(int(m.group(1)) + 1)
+        except Exception as e:
+            log("  Pollinations hata:", str(e)[:120])
+            time.sleep(10)
+    return False
+
+
+def _cloudflare(istem, hedef):
+    if not (CF_ID and CF_TOKEN):
+        return False
+    import base64
+    try:
+        r = requests.post(
+            f"https://api.cloudflare.com/client/v4/accounts/{CF_ID}/ai/run/@cf/black-forest-labs/flux-1-schnell",
+            headers={"Authorization": f"Bearer {CF_TOKEN}"}, json={"prompt": istem, "steps": 6}, timeout=150)
+        r.raise_for_status()
+        hedef.write_bytes(base64.b64decode(r.json()["result"]["image"]))
+        return True
+    except Exception as e:
+        log("  Cloudflare hata:", str(e)[:120])
+        return False
+
+
+def arka_planlari_uret(s):
+    """Senaryodaki her mekân için bir kez görsel üretir; o mekândaki tüm sahneler aynı görseli kullanır."""
+    from PIL import Image
+    mekanlar = [m for m in s.get("mekanlar", []) if isinstance(m, str) and m.strip()][:6]
+    for sh in s["sahneler"]:
+        try:
+            sh["mekan"] = int(sh.get("mekan"))
+        except (TypeError, ValueError):
+            sh["mekan"] = None
+    tohum = random.randint(1, 10 ** 6)
+    dosyalar = {}
+    kullanilan = sorted({sh.get("mekan") for sh in s["sahneler"] if isinstance(sh.get("mekan"), int)})
+    for i in kullanilan:
+        if i >= len(mekanlar):
+            continue
+        ham = GECICI / f"mekan_{i}.img"
+        png = GECICI / f"mekan_{i}.png"
+        istem = f"{mekanlar[i]}. {ARKA_PLAN_STILI}"
+        log(f"Arka plan {i + 1}/{len(kullanilan)}: {mekanlar[i][:70]}")
+        if _cloudflare(istem, ham) or _pollinations(istem, tohum, ham):
+            try:
+                im = Image.open(ham).convert("RGB")
+                k = max(W / im.width, H / im.height)            # kadrajı doldur, ortadan kırp
+                im = im.resize((round(im.width * k), round(im.height * k)), Image.LANCZOS)
+                x0, y0 = (im.width - W) // 2, (im.height - H) // 2
+                im.crop((x0, y0, x0 + W, y0 + H)).save(png)
+                dosyalar[i] = str(png)
+            except Exception as e:
+                log("  Görsel okunamadı:", e)
+        else:
+            log("  Üretilemedi, hazır mekân kullanılacak")
+    for sh in s["sahneler"]:
+        if sh.get("mekan") in dosyalar:
+            sh["bg_image"] = dosyalar[sh["mekan"]]
+    log(f"Anlatıya özel arka plan: {len(dosyalar)} mekân, "
+        f"{sum(1 for sh in s['sahneler'] if sh.get('bg_image'))}/{len(s['sahneler'])} sahne")
 
 
 # ---------------------------------------------------------------- 4) ses
@@ -366,6 +465,7 @@ def main():
     log("Konu:", konu)
     s = senaryo_yaz(konu)
     log("Başlık:", s["baslik"])
+    arka_planlari_uret(s)
     seslendir(s)
     damga = datetime.now().strftime("%Y%m%d_%H%M")
     mp4 = CIKTI / f"short_{damga}.mp4"

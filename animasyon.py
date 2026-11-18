@@ -1366,6 +1366,23 @@ def char_state(ch, slot, n_chars, W, H, S, t, gt, blinks, nesne, i_char):
         bob=bob, lean=lean, spin=spin, effects=effects, t=gt))
 
 
+def draw_bg_image(c, img, W, H):
+    """Yapay zekâ arka planını kadraja yayar; karakterler öne çıksın diye zemini hafifçe koyulaştırır."""
+    c.save()
+    k = max(W / img.get_width(), H / img.get_height())
+    c.translate((W - img.get_width() * k) / 2, (H - img.get_height() * k) / 2)
+    c.scale(k, k)
+    c.set_source_surface(img, 0, 0)
+    c.paint()
+    c.restore()
+    g = cairo.LinearGradient(0, H * 0.62, 0, H)
+    g.add_color_stop_rgba(0, 0, 0, 0, 0)
+    g.add_color_stop_rgba(1, 0, 0, 0, 0.18)
+    c.rectangle(0, H * 0.62, W, H * 0.38)
+    c.set_source(g)
+    c.fill()
+
+
 def vignette(c, W, H):
     g = cairo.RadialGradient(W / 2, H * 0.45, min(W, H) * 0.45, W / 2, H * 0.45, max(W, H) * 0.8)
     g.add_color_stop_rgba(0, 0, 0, 0, 0)
@@ -1387,6 +1404,12 @@ def scene_frames(sc, W, H, idx):
     while tt < sc["sure"] + 2:
         blinks.append(tt)
         tt += br.uniform(1.8, 4.2)
+    bg_img = None
+    if sc.get("bg_image"):
+        try:
+            bg_img = cairo.ImageSurface.create_from_png(sc["bg_image"])
+        except Exception:
+            bg_img = None
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
     c = cairo.Context(surf)
     pan_dir = 1 if idx % 2 == 0 else -1
@@ -1395,7 +1418,10 @@ def scene_frames(sc, W, H, idx):
         gt = sc.get("t0", 0) + t
         c.save()
         pan = 0                                   # sabit kamera: titreme, zoom, kayma yok
-        bg(c, W, H, gt, random.Random(seed), pan)
+        if bg_img is not None:
+            draw_bg_image(c, bg_img, W, H)
+        else:
+            bg(c, W, H, gt, random.Random(seed), pan)
         if nesne:
             with Layer(c, pan, 0.6):
                 prop(c, nesne, W * 0.5, H * 0.3, W / 820, gt)
