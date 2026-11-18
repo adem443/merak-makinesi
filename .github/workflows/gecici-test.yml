@@ -1,0 +1,29 @@
+name: gecici-test
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - name: test
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os, requests, base64, time, json
+          k=os.environ["GEMINI_API_KEY"]
+          r=requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={k}&pageSize=200",timeout=60)
+          ms=[m["name"] for m in r.json().get("models",[])]
+          print("IMAGE MODELS:", [m for m in ms if "image" in m or "imagen" in m])
+          for m in [x for x in ms if "image" in x and "gemini" in x][:4]:
+              t=time.time()
+              rr=requests.post(f"https://generativelanguage.googleapis.com/v1beta/{m}:generateContent?key={k}",timeout=120,json={
+                "contents":[{"parts":[{"text":"flat 2D vector cartoon background of a hospital room, no people, vertical 9:16"}]}],
+                "generationConfig":{"responseModalities":["IMAGE"],"imageConfig":{"aspectRatio":"9:16"}}})
+              ok = "inlineData" in rr.text
+              print("TRY", m, rr.status_code, "image" if ok else rr.text[:200].replace("\n"," "), round(time.time()-t,1))
+          for i in range(3):
+              t=time.time()
+              rr=requests.get("https://image.pollinations.ai/prompt/flat%20cartoon%20hospital%20room?width=1080&height=1920&model=flux&nologo=true&seed="+str(i),timeout=120)
+              print("POLL", rr.status_code, rr.headers.get("content-type"), len(rr.content), round(time.time()-t,1))
+              time.sleep(16)
+          PY
