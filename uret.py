@@ -102,7 +102,10 @@ LOCATIONS: First invent the 4-6 specific places this story needs ("mekanlar"), d
 in English so an illustrator can draw them, e.g. "a hospital emergency room with beds and heart monitors",
 "inside a crowded airplane cabin at night", "an ancient Roman arena under a hot sun",
 "a snowy Arctic research station in a blizzard", "a busy Tokyo street at night with neon signs".
-Each place must match what the narration says happens there. Every scene uses one of them ("mekan" = index),
+Each place must match what the narration says happens there. Be specific and imaginative, never generic:
+go INSIDE things when the story does ("inside a giant human stomach with pink walls and acid pools",
+"a microscopic view of blood cells", "the bottom of the Mariana Trench", "Earth seen from the Moon"),
+and name the real place, era and weather when the story mentions them. Every scene uses one of them ("mekan" = index),
 and consecutive scenes may share a place. Use at least 4 different places.
 
 For every scene choose ONLY from these values:
