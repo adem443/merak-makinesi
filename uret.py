@@ -470,7 +470,8 @@ def main():
     log("Konu:", konu)
     s = senaryo_yaz(konu)
     log("Başlık:", s["baslik"])
-    arka_planlari_uret(s)
+    if (ENV("AI_ARKA_PLAN") or "").lower() in ("1", "true", "evet"):
+        arka_planlari_uret(s)
     seslendir(s)
     damga = datetime.now().strftime("%Y%m%d_%H%M")
     mp4 = CIKTI / f"short_{damga}.mp4"
