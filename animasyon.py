@@ -31,7 +31,8 @@ def hx(h, a=1.0):
 
 
 def mix(h1, h2, k):
-    a, b = hx(h1), hx(h2)
+    a = hx(h1) if isinstance(h1, str) else tuple(h1) + (1.0,) * (4 - len(h1))
+    b = hx(h2) if isinstance(h2, str) else tuple(h2) + (1.0,) * (4 - len(h2))
     return tuple(a[i] + (b[i] - a[i]) * k for i in range(3)) + (1.0,)
 
 
@@ -1397,6 +1398,11 @@ def scene_frames(sc, W, H, idx):
     n = max(1, int(round(sc["sure"] * FPS)))
     seed = 1000 + idx * 17
     bg = ARKA_PLANLAR[sc["arka_plan"]]
+    if isinstance(sc.get("mekan_spec"), dict):
+        import sahneler
+        ozel = sahneler.mekan_cizici(sc["mekan_spec"])
+        if ozel:
+            bg = ozel
     nesne, kamera, chars = sc["nesne"], sc["kamera"], sc["karakterler"]
     S = W * 0.0042
     br = random.Random(seed + 5)

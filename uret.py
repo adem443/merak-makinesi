@@ -98,17 +98,12 @@ Rules:
 - {sahne_sayisi} scenes, ONE short sentence each (fast cuts). Change location, characters or action
   almost every scene; use at least 5 different locations.
 
-LOCATIONS: First invent the 4-6 specific places this story needs ("mekanlar"), described visually
-in English so an illustrator can draw them, e.g. "a hospital emergency room with beds and heart monitors",
-"inside a crowded airplane cabin at night", "an ancient Roman arena under a hot sun",
-"a snowy Arctic research station in a blizzard", "a busy Tokyo street at night with neon signs".
-Each place must match what the narration says happens there. Be specific and imaginative, never generic:
-go INSIDE things when the story does ("inside a giant human stomach with pink walls and acid pools",
-"a microscopic view of blood cells", "the bottom of the Mariana Trench", "Earth seen from the Moon"),
-and name the real place, era and weather when the story mentions them.
-Describe places EMPTY: no people, crowds, students or animals in the description (our cartoon cast is
-added on top later). Every scene uses one of them ("mekan" = index),
-and consecutive scenes may share a place. Use at least 4 different places.
+LOCATIONS: First design the 4-6 specific places this story needs ("mekanlar"). Each place is built from
+the parts below and must match what the narration says happens there (a hospital = white walls, tile floor,
+hospital_bed, heart_monitor, iv_stand; a blizzard = storm or day sky, snowy_mountains, snow ground, snow
+weather, igloo; swallowing gum = ozel stomach). Every scene uses one place ("mekan" = index), consecutive
+scenes may share a place, and at least 4 different places are used.
+{mekan_sozlugu}
 
 For every scene choose ONLY from these values:
 - "arka_plan" (backup drawing if the place image fails, pick the closest): bedroom | kitchen | classroom | lab | street | park | space | ocean | night | desert |
@@ -126,7 +121,7 @@ Return ONLY JSON:
 {{"baslik": "catchy title in {dil}, max 70 chars, 1 emoji",
   "aciklama": "2-3 sentence description in {dil} + 3 hashtags",
   "etiketler": ["8-12 tags in {dil}"],
-  "mekanlar": ["visual description of place 0", "place 1", "..."],
+  "mekanlar": [{{"tip": "ic", "duvar": "...", "zemin": "...", "pencere": "...", "esyalar": ["..."]}}, ...],
   "sahneler": [{{"metin": "narration", "mekan": 0, "arka_plan": "...", "nesne": null,
                  "karakterler": [{{"tip": "hero", "ifade": "...", "hareket": "..."}}]}}]}}"""
 
@@ -173,11 +168,19 @@ def llm_json(istem):
 
 def senaryo_yaz(konu):
     s = llm_json(SENARYO_ISTEMI.format(konu=konu, dil="Turkish" if DIL == "tr" else "English",
-                                       sahne_sayisi=random.choice([9, 10, 11, 12])))
+                                       sahne_sayisi=random.choice([9, 10, 11, 12]),
+                                       mekan_sozlugu=__import__("sahneler").ISTEM_SOZLUGU))
     assert s.get("sahneler"), "Senaryo boş geldi"
     import animasyon as A
+    mekanlar = s.get("mekanlar") if isinstance(s.get("mekanlar"), list) else []
     for i, sh in enumerate(s["sahneler"]):
         A.normalize_scene(sh)
+        try:
+            sp = mekanlar[int(sh.get("mekan"))]
+            if isinstance(sp, dict):
+                sh["mekan_spec"] = sp
+        except (TypeError, ValueError, IndexError):
+            pass
         if i == 0 and sh["kamera"] == "push_in":
             sh["kamera"] = "punch"
     s["konu"] = konu
