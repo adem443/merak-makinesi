@@ -105,7 +105,9 @@ in English so an illustrator can draw them, e.g. "a hospital emergency room with
 Each place must match what the narration says happens there. Be specific and imaginative, never generic:
 go INSIDE things when the story does ("inside a giant human stomach with pink walls and acid pools",
 "a microscopic view of blood cells", "the bottom of the Mariana Trench", "Earth seen from the Moon"),
-and name the real place, era and weather when the story mentions them. Every scene uses one of them ("mekan" = index),
+and name the real place, era and weather when the story mentions them.
+Describe places EMPTY: no people, crowds, students or animals in the description (our cartoon cast is
+added on top later). Every scene uses one of them ("mekan" = index),
 and consecutive scenes may share a place. Use at least 4 different places.
 
 For every scene choose ONLY from these values:
