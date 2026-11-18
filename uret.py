@@ -183,6 +183,10 @@ def senaryo_yaz(konu):
             pass
         if i == 0 and sh["kamera"] == "push_in":
             sh["kamera"] = "punch"
+    ozet = [(m.get("ad") or m.get("uzak") or "+".join(m.get("esyalar", [])[:2])) if isinstance(m, dict) else "?"
+            for m in mekanlar]
+    log(f"Mekânlar: {ozet} | sahnelerin {sum(1 for sh in s['sahneler'] if sh.get('mekan_spec'))}"
+        f"/{len(s['sahneler'])} tanesi hikâyeye özel mekânda")
     s["konu"] = konu
     return s
 
